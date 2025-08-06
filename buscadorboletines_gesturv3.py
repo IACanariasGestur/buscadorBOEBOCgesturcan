@@ -12,6 +12,25 @@ import os
 
 st.set_page_config(page_title="Buscador boletines oficiales [BOE/BOC]", page_icon="📰", layout="wide")
 
+st.markdown("""
+    <style>
+        /* Reduce espacio entre los elementos markdown */
+        .stMarkdown {
+            margin-bottom: 0.2rem !important;
+            margin-top: 0.2rem !important;
+        }
+        hr {
+            margin-top: 0.25rem !important;
+            margin-bottom: 0.25rem !important;
+        }
+        /* Opcional: compacta los bloques principales */
+        .block-container {
+            padding-top: 1.3rem !important;
+            padding-bottom: 1.3rem !important;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
 # --- Configuración de zona horaria ---
 tz_madrid = pytz.timezone("Europe/Madrid")
 tz_canarias = pytz.timezone("Atlantic/Canary")
