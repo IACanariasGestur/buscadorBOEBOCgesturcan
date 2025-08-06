@@ -282,7 +282,7 @@ elif accion == "🔍 Buscar texto":
             texto = f"{r['titulo']} {r['contenido']}".lower()
             if consulta.lower() in texto:
                 encontrados.append(r)
-        st.success(f"🔍 Coincidencias encontradas: {len(encontrados)}")
+        st.success(f"Coincidencias encontradas: {len(encontrados)}")
         for r in encontrados:
             st.markdown(f"**[{r['n_original']}]** {'🟥' if r['boletin']=='BOE' else '⬜'} {r['boletin']} - {r['fecha']}")
             st.markdown(f"📰 {r['titulo']}")
