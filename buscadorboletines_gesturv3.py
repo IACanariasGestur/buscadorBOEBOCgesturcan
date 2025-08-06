@@ -272,7 +272,7 @@ if accion == "🗂️ Ver boletines":
         st.markdown(f"**[{r['n_original']}]** {'🟥' if r['boletin']=='BOE' else '⬜'} {r['boletin']} - {r['fecha']}")
         st.markdown(f"📰 {r['titulo']}")
         st.markdown(f"🔗 [Ir al boletín original]({r['url']})")
-        st.write("---")
+        st.markdown("<hr style='margin:0.15rem 0;'>", unsafe_allow_html=True)
 
 # --- Acción: Buscar texto ---
 elif accion == "🔍 Buscar texto":
