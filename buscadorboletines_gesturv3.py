@@ -10,6 +10,8 @@ import re
 import html as html_stdlib
 import os
 
+st.set_page_config(page_title="Buscador boletines oficiales [BOE/BOC]", page_icon="📰", layout="wide")
+
 # --- Configuración de zona horaria ---
 tz_madrid = pytz.timezone("Europe/Madrid")
 tz_canarias = pytz.timezone("Atlantic/Canary")
