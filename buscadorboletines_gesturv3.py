@@ -231,7 +231,7 @@ def cargar_boletines_con_numeracion():
     return boe, boc, resultados_totales
 
 # --- App principal ---
-st.set_page_config(page_title="Buscador Diario Boletines", page_icon="⚖️")
+st.set_page_config(page_title="Buscador boletines", page_icon="⚖️")
 st.title("Buscador boletines oficiales [BOE/BOC]")
 
 st.info(f"📅 Hoy (Madrid): {hoy_madrid.strftime('%Y-%m-%d')} | 📅 Hoy (Canarias): {hoy_canarias.strftime('%Y-%m-%d')}")
