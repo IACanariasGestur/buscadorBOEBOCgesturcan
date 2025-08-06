@@ -325,4 +325,4 @@ elif accion == "📝 Resumir por número":
             st.error("❌ Por favor introduce un número válido.")
 
 
-st.info("Desarrollado en Python por JCastro · ©2025")
+st.info("Desarrollado por JCastro / ©2025")
