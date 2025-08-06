@@ -308,7 +308,7 @@ elif accion == "📝 Resumir por número":
                 else:
                     st.success("Texto extraído correctamente. Generando resumen...")
                     # Nuevo corte ajustado para no superar el límite de tokens
-                    max_palabras = 4500
+                    max_palabras = 4000
                     palabras = texto_completo.split()
                     if len(palabras) > max_palabras:
                         texto_para_modelo = " ".join(palabras[:max_palabras]) + "..."
