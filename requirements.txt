@@ -1,0 +1,6 @@
+streamlit
+feedparser
+pytz
+requests
+beautifulsoup4
+openai
