@@ -16,17 +16,16 @@ st.markdown("""
     <style>
         /* Reduce espacio entre los elementos markdown */
         .stMarkdown {
-            margin-bottom: 0.2rem !important;
-            margin-top: 0.2rem !important;
+            margin-bottom: 0.08rem !important;
+            margin-top: 0.08rem !important;
         }
         hr {
-            margin-top: 0.25rem !important;
-            margin-bottom: 0.25rem !important;
+            margin-top: 0.10rem !important;
+            margin-bottom: 0.10rem !important;
         }
-        /* Opcional: compacta los bloques principales */
         .block-container {
-            padding-top: 1.3rem !important;
-            padding-bottom: 1.3rem !important;
+            padding-top: 0.9rem !important;
+            padding-bottom: 0.9rem !important;
         }
     </style>
 """, unsafe_allow_html=True)
