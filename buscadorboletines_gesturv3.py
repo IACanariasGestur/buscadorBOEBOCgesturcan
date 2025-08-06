@@ -1,5 +1,3 @@
-# Buscador de Boletines BOE y BOC - Streamlit con numeración global
-
 import streamlit as st
 from datetime import datetime, timedelta
 import pytz
