@@ -1,4 +1,4 @@
-# Buscador de Boletines BOE y BOC - Adaptado a Streamlit
+# Buscador de Boletines BOE y BOC - Streamlit con numeración global
 
 import streamlit as st
 from datetime import datetime, timedelta
@@ -58,7 +58,6 @@ def obtener_boe_reciente():
                         "contenido": titulo_real
                     })
             except Exception as e:
-                # Silenciar error
                 continue
         if resultados:
             return resultados
@@ -137,7 +136,6 @@ def parsear_feed_con_fecha(url, fecha_objetivo):
                         "contenido": resumen
                     })
     except Exception as e:
-        # Silenciar error
         pass
     return resultados
 
@@ -205,19 +203,23 @@ def resumir_con_groq(texto, max_tokens=700):
 
 # --- Cargar boletines al iniciar (cache) ---
 @st.cache_data(show_spinner="Cargando boletines...")
-def cargar_boletines():
+def cargar_boletines_con_numeracion():
     boe = obtener_boe_reciente()
     boc = obtener_boc_reciente()
-    return boe, boc, boe + boc
+    resultados_totales = boe + boc
+    # Asignar numeración original global
+    for idx, r in enumerate(resultados_totales, 1):
+        r["n_original"] = idx
+    return boe, boc, resultados_totales
 
 # --- App principal ---
 st.set_page_config(page_title="Buscador de Boletines Oficiales", page_icon="📰")
-st.title("📰 Buscador de Boletines Oficiales (BOE y BOC)")
+st.title("Buscador boletines oficiales [BOE/BOC]")
 
 st.info(f"📅 Hoy (Madrid): {hoy_madrid.strftime('%Y-%m-%d')} | 📅 Hoy (Canarias): {hoy_canarias.strftime('%Y-%m-%d')}")
 
-# --- Cargar resultados con spinner ---
-resultados_boe, resultados_boc, resultados_totales = cargar_boletines()
+# --- Cargar resultados con numeración global ---
+resultados_boe, resultados_boc, resultados_totales = cargar_boletines_con_numeracion()
 
 # --- Menú de acciones ---
 accion = st.selectbox(
@@ -232,9 +234,9 @@ if accion == "🗂️ Ver boletines":
         ["✅ Todos", "🟥 Solo BOE", "⬜ Solo BOC"]
     )
     if filtro == "🟥 Solo BOE":
-        resultados = resultados_boe
+        resultados = [r for r in resultados_totales if r["boletin"] == "BOE"]
     elif filtro == "⬜ Solo BOC":
-        resultados = resultados_boc
+        resultados = [r for r in resultados_totales if r["boletin"] == "BOC"]
     else:
         resultados = resultados_totales
 
@@ -247,10 +249,10 @@ if accion == "🗂️ Ver boletines":
 
     st.write(f"📋 Mostrando resultados {inicio + 1} a {fin} de {len(resultados)}")
 
-    for idx, doc in enumerate(resultados[inicio:fin], start=inicio+1):
-        st.markdown(f"**[{idx}]** {'🟥' if doc['boletin']=='BOE' else '⬜'} {doc['boletin']} - {doc['fecha']}")
-        st.markdown(f"📰 {doc['titulo']}")
-        st.markdown(f"🔗 [Ir al boletín original]({doc['url']})")
+    for r in resultados[inicio:fin]:
+        st.markdown(f"**[{r['n_original']}]** {'🟥' if r['boletin']=='BOE' else '⬜'} {r['boletin']} - {r['fecha']}")
+        st.markdown(f"📰 {r['titulo']}")
+        st.markdown(f"🔗 [Ir al boletín original]({r['url']})")
         st.write("---")
 
 # --- Acción: Buscar texto ---
@@ -258,12 +260,10 @@ elif accion == "🔍 Buscar texto":
     consulta = st.text_input("Escribe el texto que quieres buscar en los boletines:")
     if consulta and len(consulta) >= 2:
         encontrados = []
-        for idx, r in enumerate(resultados_totales, 1):
+        for r in resultados_totales:
             texto = f"{r['titulo']} {r['contenido']}".lower()
             if consulta.lower() in texto:
-                r_copia = r.copy()
-                r_copia["n_original"] = idx
-                encontrados.append(r_copia)
+                encontrados.append(r)
         st.success(f"🔍 Coincidencias encontradas: {len(encontrados)}")
         for r in encontrados:
             st.markdown(f"**[{r['n_original']}]** {'🟥' if r['boletin']=='BOE' else '⬜'} {r['boletin']} - {r['fecha']}")
@@ -273,14 +273,14 @@ elif accion == "🔍 Buscar texto":
     elif consulta:
         st.warning("Escribe al menos 2 caracteres para buscar.")
 
-# --- Acción: Resumir por número ---
+# --- Acción: Resumir por número global (n_original) ---
 elif accion == "📝 Resumir por número":
     num_str = st.text_input("Introduce el número del anuncio (ejemplo: 91):")
     if num_str:
         try:
-            idx = int(num_str) - 1
-            if 0 <= idx < len(resultados_totales):
-                anuncio = resultados_totales[idx]
+            num = int(num_str)
+            anuncio = next((r for r in resultados_totales if r["n_original"] == num), None)
+            if anuncio is not None:
                 st.markdown(f"### 📰 {anuncio.get('titulo', '').strip()}")
                 st.markdown(f"🔗 [Ver boletín completo]({anuncio.get('url', '')})")
                 with st.spinner("📡 Obteniendo texto completo del enlace..."):
@@ -304,5 +304,6 @@ elif accion == "📝 Resumir por número":
                 st.error("❌ Número fuera del rango.")
         except ValueError:
             st.error("❌ Por favor introduce un número válido.")
+
 
 st.info("Desarrollado en Python por JCastro · ©2025")
