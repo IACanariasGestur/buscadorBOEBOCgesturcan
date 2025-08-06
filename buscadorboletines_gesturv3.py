@@ -307,11 +307,12 @@ elif accion == "📝 Resumir por número":
                     st.error(texto_completo)
                 else:
                     st.success("Texto extraído correctamente. Generando resumen...")
-                    # Recortar si muy largo (protección tokens)
-                    if len(texto_completo.split()) > 7000:
-                        palabras = texto_completo.split()
-                        texto_para_modelo = " ".join(palabras[:1000]) + "..."
-                        st.info("✂️ Texto recortado a 1000 palabras para evitar errores por exceso de tokens.")
+                    # Nuevo corte ajustado para no superar el límite de tokens
+                    max_palabras = 4500
+                    palabras = texto_completo.split()
+                    if len(palabras) > max_palabras:
+                        texto_para_modelo = " ".join(palabras[:max_palabras]) + "..."
+                        st.info(f"✂️ Texto recortado a {max_palabras} palabras para no superar el límite del modelo.")
                     else:
                         texto_para_modelo = texto_completo
                     with st.spinner("⏳ Resumiendo con Groq..."):
