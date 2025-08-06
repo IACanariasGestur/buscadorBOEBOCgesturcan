@@ -249,9 +249,9 @@ accion = st.selectbox(
 if accion == "🗂️ Ver boletines":
     filtro = st.selectbox(
         "Filtrar por boletín:",
-        ["✅ Todos", "🟥 Solo BOE", "⬜ Solo BOC"]
+        ["✅ Todos", "🇪🇸 Solo BOE", "⬜ Solo BOC"]
     )
-    if filtro == "🟥 Solo BOE":
+    if filtro == "🇪🇸 Solo BOE":
         resultados = [r for r in resultados_totales if r["boletin"] == "BOE"]
     elif filtro == "⬜ Solo BOC":
         resultados = [r for r in resultados_totales if r["boletin"] == "BOC"]
@@ -268,7 +268,7 @@ if accion == "🗂️ Ver boletines":
     st.write(f"📋 Mostrando resultados {inicio + 1} a {fin} de {len(resultados)}")
 
     for r in resultados[inicio:fin]:
-        st.markdown(f"**[{r['n_original']}]** {'🟥' if r['boletin']=='BOE' else '⬜'} {r['boletin']} - {r['fecha']}")
+        st.markdown(f"**[{r['n_original']}]** {'🇪🇸' if r['boletin']=='BOE' else '⬜'} {r['boletin']} - {r['fecha']}")
         st.markdown(f"📰 {r['titulo']}")
         st.markdown(f"🔗 [Ir al boletín original]({r['url']})")
         st.markdown("<hr style='margin:0.15rem 0;'>", unsafe_allow_html=True)
@@ -284,7 +284,7 @@ elif accion == "🔍 Buscar texto":
                 encontrados.append(r)
         st.success(f"🔍 Coincidencias encontradas: {len(encontrados)}")
         for r in encontrados:
-            st.markdown(f"**[{r['n_original']}]** {'🟥' if r['boletin']=='BOE' else '⬜'} {r['boletin']} - {r['fecha']}")
+            st.markdown(f"**[{r['n_original']}]** {'🇪🇸' if r['boletin']=='BOE' else '⬜'} {r['boletin']} - {r['fecha']}")
             st.markdown(f"📰 {r['titulo']}")
             st.markdown(f"🔗 [Ir al boletín original]({r['url']})")
             st.write("---")
