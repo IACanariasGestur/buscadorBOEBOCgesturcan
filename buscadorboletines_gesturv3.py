@@ -1,50 +1,69 @@
 import streamlit as st
 from datetime import datetime, timedelta
-import pytz
-import feedparser
-import requests
+import pytz, feedparser, requests, re, html as html_stdlib, os
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import re
-import html as html_stdlib
-import os
+from openai import OpenAI
 
 st.set_page_config(page_title="Buscador boletines oficiales [BOE/BOC]", page_icon="📰", layout="wide")
 
+# --- Estilos ---
 st.markdown("""
-    <style>
-        /* Reduce espacio entre los elementos markdown */
-        .stMarkdown {
-            margin-bottom: 0.08rem !important;
-            margin-top: 0.08rem !important;
-        }
-        hr {
-            margin-top: 0.10rem !important;
-            margin-bottom: 0.10rem !important;
-        }
-        .block-container {
-            padding-top: 0.9rem !important;
-            padding-bottom: 0.9rem !important;
-        }
-    </style>
+<style>
+.stMarkdown { margin-bottom: .08rem !important; margin-top: .08rem !important; }
+hr { margin-top: .10rem !important; margin-bottom: .10rem !important; }
+.block-container { padding-top: .9rem !important; padding-bottom: .9rem !important; }
+</style>
 """, unsafe_allow_html=True)
 
-# --- Configuración de zona horaria ---
+# --- Zonas horarias ---
 tz_madrid = pytz.timezone("Europe/Madrid")
 tz_canarias = pytz.timezone("Atlantic/Canary")
 hoy_madrid = datetime.now(tz_madrid).date()
 hoy_canarias = datetime.now(tz_canarias).date()
 
-# --- Obtener clave ---
-from openai import OpenAI
+# --- Groq: obtener clave (IMPORTANTE: strip para eliminar \n/espacios) ---
+API_KEY = st.secrets["GROQ_API_KEY"].strip()
+client = OpenAI(api_key=API_KEY, base_url="https://api.groq.com/openai/v1")
 
-GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
+# Test rápido: confirma que la clave funciona en esta app
+if "groq_checked" not in st.session_state:
+    try:
+        r = requests.get(
+            "https://api.groq.com/openai/v1/models",
+            headers={"Authorization": f"Bearer {API_KEY}"},
+            timeout=15
+        )
+        st.session_state.groq_checked = (r.status_code, r.text[:200])
+        if r.status_code != 200:
+            st.error(f"Groq /models devolvió {r.status_code}. Revisa el secreto (puede tener espacios o \n).")
+    except Exception as e:
+        st.error(f"Error comprobando Groq: {e}")
 
-client = OpenAI(
-    api_key=GROQ_API_KEY,
-    base_url="https://api.groq.com/openai/v1"
-)
+# ---------------------------------------------------------
+# ... tu código igual que antes ...
+# ---------------------------------------------------------
+
+def resumir_con_groq(texto, max_tokens=700):
+    try:
+        prompt = (
+            "Resume de forma clara, directa y en español el siguiente contenido legal. "
+            "Incluye el motivo del decreto, sus objetivos principales y las medidas más relevantes."
+            "\n\n" + texto
+        )
+        resp = client.chat.completions.create(
+            model="llama3-8b-8192",     # usa uno de los que te listó /models
+            messages=[
+                {"role": "system", "content": "Eres un experto legal que resume documentos de manera precisa."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2,
+            max_tokens=max_tokens,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        return f"❌ Error generando resumen con Groq: {e}"
 
 # --- Funciones BOE ---
 def obtener_boe_reciente():
@@ -193,26 +212,22 @@ def extraer_texto_completo_desde_url(url):
 
 # --- Función para resumir con Groq (usa Llama3) ---
 def resumir_con_groq(texto, max_tokens=700):
-    if not client:
-        return "❌ El cliente de OpenAI/Groq no está disponible."
     try:
         prompt = (
             "Resume de forma clara, directa y en español el siguiente contenido legal. "
-            "Incluye el motivo del decreto, sus objetivos principales y las medidas más relevantes. "
-            "No omitas el resumen bajo ninguna circunstancia.\n\n"
-            f"{texto}"
+            "Incluye el motivo del decreto, sus objetivos principales y las medidas más relevantes."
+            "\n\n" + texto
         )
-        response = client.chat.completions.create(
-            model="llama3-70b-8192",
+        resp = client.chat.completions.create(
+            model="llama3-8b-8192",     # usa uno de los que te listó /models
             messages=[
                 {"role": "system", "content": "Eres un experto legal que resume documentos de manera precisa."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.8,
+            temperature=0.2,
             max_tokens=max_tokens,
         )
-        resumen = response.choices[0].message.content.strip()
-        return resumen
+        return resp.choices[0].message.content.strip()
     except Exception as e:
         return f"❌ Error generando resumen con Groq: {e}"
 
