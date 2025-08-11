@@ -37,6 +37,8 @@ hoy_madrid = datetime.now(tz_madrid).date()
 hoy_canarias = datetime.now(tz_canarias).date()
 
 # --- Obtejer clave ---
+from openai import OpenAI
+
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 
 client = OpenAI(
