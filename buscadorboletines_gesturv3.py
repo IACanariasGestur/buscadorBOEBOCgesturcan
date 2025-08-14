@@ -194,10 +194,11 @@ def extraer_texto_completo_desde_url(url):
         return f"❌ Error al extraer texto completo: {e}"
 
 # --- Función para resumir con Gemini ---
-def resumir_con_gemini(texto, max_tokens=700, reasoning_effort="low", debug=False):
+def resumir_con_gemini(texto, max_tokens=700, use_model="gemini-2.5-pro", debug=False):
     """
-    Genera un resumen legal claro en español con Gemini 2.5 Pro (OpenAI-compatible).
-    Robusta ante message.content None o contenido en lista.
+    Resumen legal con Gemini (OpenAI-compatible), con extracción robusta del contenido.
+    - Si no hay texto, intenta varios formatos conocidos.
+    - Si falla, prueba modelo alternativo automáticamente.
     """
     try:
         prompt = (
@@ -206,61 +207,87 @@ def resumir_con_gemini(texto, max_tokens=700, reasoning_effort="low", debug=Fals
             + (texto or "")
         )
 
+        # --- 1) Llamada ---
         resp = client.chat.completions.create(
-            model="gemini-2.5-pro",
+            model=use_model,
             messages=[
                 {"role": "system", "content": "Eres un experto legal que resume documentos de manera precisa."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.2,
             max_tokens=max_tokens,
-            reasoning_effort=reasoning_effort
+            # Si quisieras controlar el razonamiento en algunos backends, usa:
+            # reasoning={"effort": "low"}  # en lugar de reasoning_effort
         )
 
-        # --- Extracción robusta del contenido ---
-        def _as_text(x):
-            if isinstance(x, str):
-                return x
-            if isinstance(x, list):
-                partes = []
-                for p in x:
-                    # algunos backends devuelven [{"type":"text","text":"..."}]
+        # --- 2) Extractor súper tolerante ---
+        def _to_text(v):
+            if v is None:
+                return None
+            if isinstance(v, str):
+                return v
+            if isinstance(v, list):
+                buf = []
+                for p in v:
+                    # formatos típicos: {"type":"text","text":"..."} o {"type":"output_text","text":"..."}
                     if isinstance(p, dict) and "text" in p:
-                        partes.append(p["text"])
+                        buf.append(str(p.get("text") or ""))
                     else:
-                        partes.append(str(p))
-                return "".join(partes)
+                        buf.append(str(p))
+                return "".join(buf)
+            if isinstance(v, dict):
+                # algunos devuelven {"type":"text","text":"..."}
+                if "text" in v and isinstance(v["text"], str):
+                    return v["text"]
             return None
 
         texto_resumen = None
 
-        # 1) Formato OpenAI estándar
+        # a) OpenAI clásico: choices[0].message.content (string o lista de partes)
         try:
             msg = resp.choices[0].message
             content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
-            texto_resumen = _as_text(content)
+            texto_resumen = _to_text(content)
         except Exception:
             pass
 
-        # 2) Alternativa: choices[0].text
+        # b) Alternativa: choices[0].text
         if not texto_resumen:
             try:
                 ch0 = resp.choices[0]
-                alt = ch0.get("text") if isinstance(ch0, dict) else getattr(ch0, "text", None)
-                if isinstance(alt, str):
-                    texto_resumen = alt
+                alt_text = ch0.get("text") if isinstance(ch0, dict) else getattr(ch0, "text", None)
+                if isinstance(alt_text, str):
+                    texto_resumen = alt_text
             except Exception:
                 pass
 
-        # 3) Si sigue vacío, mensaje útil
+        # c) Alternativa rara: content como lista con "output_text"
         if not texto_resumen:
+            try:
+                msg = resp.choices[0].message
+                content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") in ("text", "output_text") and isinstance(part.get("text"), str):
+                            texto_resumen = (texto_resumen or "") + part["text"]
+            except Exception:
+                pass
+
+        # d) Si seguimos sin texto: o el modelo no es válido en este endpoint o el formato cambió.
+        if not (texto_resumen and texto_resumen.strip()):
+            # Intento 2: probar un modelo alternativo que suele estar habilitado
+            fallback = "gemini-2.5-flash"
+            if use_model != fallback:
+                return resumir_con_gemini(texto, max_tokens=max_tokens, use_model=fallback, debug=debug)
+
+            # Último recurso: mostrar payload para inspección
             if debug:
-                import json
                 try:
-                    st.code(json.dumps(resp.model_dump(), ensure_ascii=False)[:2000])
+                    import json
+                    st.code(json.dumps(resp.to_dict() if hasattr(resp, "to_dict") else resp.model_dump(), ensure_ascii=False)[:3000])
                 except Exception:
                     st.write(resp)
-            return "⚠️ No se pudo extraer texto del modelo. Revisa el modelo/base_url o activa debug=True para inspeccionar la respuesta."
+            return "⚠️ No se pudo extraer texto del modelo. Prueba con otro modelo o revisa el endpoint."
 
         return texto_resumen.strip()
 
