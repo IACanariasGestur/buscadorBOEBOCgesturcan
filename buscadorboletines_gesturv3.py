@@ -188,22 +188,15 @@ import random
 def resumir_con_gemini(texto, max_tokens=700, modelo="gemini-2.5-pro", debug=False):
     """
     Resumen legal en español con el SDK oficial de Gemini (google-genai).
+    - Config simple (sin safety_settings).
     - Reintenta 5xx y hace fallback a 'gemini-2.5-flash'.
-    - Fuerza salida en texto plano y baja los umbrales de seguridad para evitar bloqueos injustificados.
+    - Fuerza salida en texto plano.
     """
     prompt_usuario = (
         "Resume de forma clara, directa y en español el siguiente contenido legal. "
         "Incluye el motivo del decreto, sus objetivos principales y las medidas más relevantes.\n\n"
         + (texto or "")
     )
-
-    generation_config = {
-        "temperature": 0.2,
-        "max_output_tokens": min(max_tokens, 700),
-    }
-
-    # Esta variable ya no se usa (los safety settings se configuran en _call)
-    safety_settings = None  # la dejo para compatibilidad con tu código
 
     def _extract_text(resp):
         try:
@@ -249,33 +242,24 @@ def resumir_con_gemini(texto, max_tokens=700, modelo="gemini-2.5-pro", debug=Fal
         except Exception:
             return None
 
-    def _call(modelo_activo, cfg):
-        # Ajustes de seguridad mínimos para resúmenes legales
-        safety_settings_local = [
-            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT",        threshold="BLOCK_NONE"),
-            types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH",       threshold="BLOCK_NONE"),
-            types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
-            types.SafetySetting(category="HARM_CATEGORY_SEXUAL_CONTENT",    threshold="BLOCK_NONE"),
-            # Si tu SDK soporta esta categoría, puedes destaparla también:
-            # types.SafetySetting(category="HARM_CATEGORY_CIVIC_INTEGRITY", threshold="BLOCK_NONE"),
-        ]
-
+    def _call(modelo_activo, max_out):
         return gclient.models.generate_content(
-            model=modelo_activo,             # "gemini-2.5-pro" o "models/gemini-2.5-pro"
-            contents=prompt_usuario,         # pasar string directo es más robusto
+            model=modelo_activo,          # "gemini-2.5-pro" o "models/gemini-2.5-pro"
+            contents=prompt_usuario,      # string directo
             config=types.GenerateContentConfig(
-                temperature=cfg.get("temperature", 0.2),
-                max_output_tokens=cfg.get("max_output_tokens", 700),
+                temperature=0.2,
+                max_output_tokens=max_out,
                 system_instruction="Eres un experto legal que resume documentos de manera precisa.",
-                response_mime_type="text/plain",          # fuerza salida como texto
-                safety_settings=safety_settings_local,    # safety dentro de config
+                response_mime_type="text/plain",  # salida en texto plano
             ),
         )
+
+    max_out_main = min(max_tokens, 700)
 
     # 1) Intentos contra el modelo principal
     for intento in range(3):
         try:
-            resp = _call(modelo, generation_config)
+            resp = _call(modelo, max_out_main)
             texto_out = _extract_text(resp)
             if texto_out:
                 return texto_out
@@ -294,7 +278,7 @@ def resumir_con_gemini(texto, max_tokens=700, modelo="gemini-2.5-pro", debug=Fal
     # 2) Fallback a modelo rápido
     modelo_fallback = "gemini-2.5-flash"
     try:
-        resp = _call(modelo_fallback, {**generation_config, "max_output_tokens": min(max_tokens, 600)})
+        resp = _call(modelo_fallback, min(max_tokens, 600))
         texto_out = _extract_text(resp)
         if texto_out:
             return texto_out + "\n\n_(Generado con modelo de respaldo: gemini-2.5-flash)_"
