@@ -188,9 +188,8 @@ import random
 def resumir_con_gemini(texto, max_tokens=700, modelo="gemini-2.5-pro", debug=False):
     """
     Resumen legal en español con el SDK oficial de Gemini (google-genai).
-    - Envía contents como lista de mensajes/parts o string.
-    - Extrae texto de resp.text o de candidates[*].content.parts[*].text.
     - Reintenta 5xx y hace fallback a 'gemini-2.5-flash'.
+    - Fuerza salida en texto plano y baja los umbrales de seguridad para evitar bloqueos injustificados.
     """
     prompt_usuario = (
         "Resume de forma clara, directa y en español el siguiente contenido legal. "
@@ -203,9 +202,8 @@ def resumir_con_gemini(texto, max_tokens=700, modelo="gemini-2.5-pro", debug=Fal
         "max_output_tokens": min(max_tokens, 700),
     }
 
-    # Si quieres forzar umbrales, muévelos dentro de config (ver comentario en _call)
-    # safety_settings = [...]
-    safety_settings = None
+    # Esta variable ya no se usa (los safety settings se configuran en _call)
+    safety_settings = None  # la dejo para compatibilidad con tu código
 
     def _extract_text(resp):
         try:
@@ -243,23 +241,34 @@ def resumir_con_gemini(texto, max_tokens=700, modelo="gemini-2.5-pro", debug=Fal
                 if fr: info.append(f"finish_reason={fr}")
                 sr = getattr(c, "safety_ratings", None) or getattr(c, "safetyRatings", None)
                 if sr: info.append(f"safety_ratings={sr}")
+            pf = getattr(resp, "prompt_feedback", None) or getattr(resp, "promptFeedback", None)
+            if pf:
+                br = getattr(pf, "block_reason", None) or getattr(pf, "blockReason", None)
+                if br: info.append(f"prompt_block_reason={br}")
             return " | ".join(info) if info else None
         except Exception:
             return None
 
     def _call(modelo_activo, cfg):
-        # Si activas safety_settings, colócalos dentro de GenerateContentConfig(...)
+        # Ajustes de seguridad mínimos para resúmenes legales
+        safety_settings_local = [
+            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT",        threshold="BLOCK_NONE"),
+            types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH",       threshold="BLOCK_NONE"),
+            types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+            types.SafetySetting(category="HARM_CATEGORY_SEXUAL_CONTENT",    threshold="BLOCK_NONE"),
+            # Si tu SDK soporta esta categoría, puedes destaparla también:
+            # types.SafetySetting(category="HARM_CATEGORY_CIVIC_INTEGRITY", threshold="BLOCK_NONE"),
+        ]
+
         return gclient.models.generate_content(
-            model=modelo_activo,
-            contents=[{"role": "user", "parts": [{"text": prompt_usuario}]}],
+            model=modelo_activo,             # "gemini-2.5-pro" o "models/gemini-2.5-pro"
+            contents=prompt_usuario,         # pasar string directo es más robusto
             config=types.GenerateContentConfig(
                 temperature=cfg.get("temperature", 0.2),
                 max_output_tokens=cfg.get("max_output_tokens", 700),
                 system_instruction="Eres un experto legal que resume documentos de manera precisa.",
-                # safety_settings=[
-                #     types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-                #     ...
-                # ],
+                response_mime_type="text/plain",          # fuerza salida como texto
+                safety_settings=safety_settings_local,    # safety dentro de config
             ),
         )
 
