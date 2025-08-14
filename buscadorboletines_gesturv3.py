@@ -4,7 +4,6 @@ import pytz, feedparser, requests, re, html as html_stdlib, os
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from openai import OpenAI
 
 st.set_page_config(page_title="Buscador boletines oficiales [BOE/BOC]", page_icon="📰", layout="wide")
 
@@ -28,25 +27,17 @@ GEMINI_API_KEY = (st.secrets.get("GEMINI_API_KEY") or "").strip()
 if not GEMINI_API_KEY:
     st.error("Falta GEMINI_API_KEY en secrets.")
 
-from openai import OpenAI
-client = OpenAI(
-    api_key=GEMINI_API_KEY,
-    base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
-)
+from google import genai
 
-# Test rápido: confirma que la clave funciona en esta app
-if "gemini_checked" not in st.session_state:
-    try:
-        r = requests.get(
-            "https://generativelanguage.googleapis.com/v1beta/openai/models",
-            headers={"Authorization": f"Bearer {GEMINI_API_KEY}"},
-            timeout=15
-        )
-        st.session_state.gemini_checked = (r.status_code, r.text[:200])
-        if r.status_code != 200:
-            st.error("Gemini /models no respondió 200. Revisa el secreto GEMINI_API_KEY.")
-    except Exception as e:
-        st.error(f"Error comprobando Gemini: {e}")
+# Cliente oficial Gemini
+try:
+    gclient = genai.Client(api_key=GEMINI_API_KEY)
+    if "gemini_checked" not in st.session_state:
+        # ping muy ligero para validar la clave (lista un modelo concreto)
+        _ = gclient.models.get("gemini-2.5-pro")
+        st.session_state.gemini_checked = ("OK", "gemini-2.5-pro disponible")
+except Exception as e:
+    st.error(f"Error inicializando el cliente de Gemini: {e}")
 
 # --- Funciones BOE ---
 def obtener_boe_reciente():
@@ -194,11 +185,10 @@ def extraer_texto_completo_desde_url(url):
         return f"❌ Error al extraer texto completo: {e}"
 
 # --- Función para resumir con Gemini ---
-def resumir_con_gemini(texto, max_tokens=700, use_model="gemini-2.5-pro", debug=False):
+def resumir_con_gemini(texto, max_tokens=700, modelo="gemini-2.5-pro"):
     """
-    Resumen legal con Gemini (OpenAI-compatible), con extracción robusta del contenido.
-    - Si no hay texto, intenta varios formatos conocidos.
-    - Si falla, prueba modelo alternativo automáticamente.
+    Genera un resumen legal en español con el SDK oficial de Gemini.
+    Devuelve siempre texto plano (response.text).
     """
     try:
         prompt = (
@@ -207,89 +197,21 @@ def resumir_con_gemini(texto, max_tokens=700, use_model="gemini-2.5-pro", debug=
             + (texto or "")
         )
 
-        # --- 1) Llamada ---
-        resp = client.chat.completions.create(
-            model=use_model,
-            messages=[
-                {"role": "system", "content": "Eres un experto legal que resume documentos de manera precisa."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2,
-            max_tokens=max_tokens,
-            # Si quisieras controlar el razonamiento en algunos backends, usa:
-            # reasoning={"effort": "low"}  # en lugar de reasoning_effort
+        # Nota: en el SDK oficial, el límite de salida es `max_output_tokens`
+        resp = gclient.models.generate_content(
+            model=modelo,
+            contents=prompt,
+            config={
+                "temperature": 0.2,
+                "max_output_tokens": max_tokens
+            }
         )
 
-        # --- 2) Extractor súper tolerante ---
-        def _to_text(v):
-            if v is None:
-                return None
-            if isinstance(v, str):
-                return v
-            if isinstance(v, list):
-                buf = []
-                for p in v:
-                    # formatos típicos: {"type":"text","text":"..."} o {"type":"output_text","text":"..."}
-                    if isinstance(p, dict) and "text" in p:
-                        buf.append(str(p.get("text") or ""))
-                    else:
-                        buf.append(str(p))
-                return "".join(buf)
-            if isinstance(v, dict):
-                # algunos devuelven {"type":"text","text":"..."}
-                if "text" in v and isinstance(v["text"], str):
-                    return v["text"]
-            return None
-
-        texto_resumen = None
-
-        # a) OpenAI clásico: choices[0].message.content (string o lista de partes)
-        try:
-            msg = resp.choices[0].message
-            content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
-            texto_resumen = _to_text(content)
-        except Exception:
-            pass
-
-        # b) Alternativa: choices[0].text
-        if not texto_resumen:
-            try:
-                ch0 = resp.choices[0]
-                alt_text = ch0.get("text") if isinstance(ch0, dict) else getattr(ch0, "text", None)
-                if isinstance(alt_text, str):
-                    texto_resumen = alt_text
-            except Exception:
-                pass
-
-        # c) Alternativa rara: content como lista con "output_text"
-        if not texto_resumen:
-            try:
-                msg = resp.choices[0].message
-                content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
-                if isinstance(content, list):
-                    for part in content:
-                        if isinstance(part, dict) and part.get("type") in ("text", "output_text") and isinstance(part.get("text"), str):
-                            texto_resumen = (texto_resumen or "") + part["text"]
-            except Exception:
-                pass
-
-        # d) Si seguimos sin texto: o el modelo no es válido en este endpoint o el formato cambió.
-        if not (texto_resumen and texto_resumen.strip()):
-            # Intento 2: probar un modelo alternativo que suele estar habilitado
-            fallback = "gemini-2.5-flash"
-            if use_model != fallback:
-                return resumir_con_gemini(texto, max_tokens=max_tokens, use_model=fallback, debug=debug)
-
-            # Último recurso: mostrar payload para inspección
-            if debug:
-                try:
-                    import json
-                    st.code(json.dumps(resp.to_dict() if hasattr(resp, "to_dict") else resp.model_dump(), ensure_ascii=False)[:3000])
-                except Exception:
-                    st.write(resp)
-            return "⚠️ No se pudo extraer texto del modelo. Prueba con otro modelo o revisa el endpoint."
-
-        return texto_resumen.strip()
+        # El SDK oficial expone el texto directamente
+        resumen = (resp.text or "").strip()
+        if not resumen:
+            return "⚠️ El modelo no devolvió texto. Verifica la clave, el modelo o el límite de tokens."
+        return resumen
 
     except Exception as e:
         return f"❌ Error generando resumen con Gemini: {e}"
