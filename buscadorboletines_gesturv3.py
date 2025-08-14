@@ -184,44 +184,45 @@ def extraer_texto_completo_desde_url(url):
 import time
 import random
 
-def resumir_con_gemini(texto, max_tokens=700, modelo="gemini-2.5-pro", debug=False):
+def resumir_con_gemini(texto, max_tokens=700, modelo="models/gemini-2.5-pro", debug=False):
     """
-    Resumen legal en español con el SDK oficial de Gemini.
-    - Extrae texto de resp.text o de resp.candidates[*].content.parts[*].text.
-    - Muestra razón de finalización si no hay texto (p.ej., SAFETY).
-    - Reintenta en 5xx y hace fallback a 'gemini-2.5-flash'.
+    Resumen legal en español con el SDK oficial de Gemini (google-genai).
+    - Usa resource name completo del modelo: "models/gemini-2.5-pro".
+    - Envía contents como lista de mensajes/parts.
+    - Extrae texto de resp.text o de candidates[*].content.parts[*].text.
+    - Muestra finish_reason/safety si no hay texto.
+    - Reintenta 5xx y hace fallback a 'models/gemini-2.5-flash'.
     """
-    prompt = (
+    prompt_usuario = (
         "Resume de forma clara, directa y en español el siguiente contenido legal. "
         "Incluye el motivo del decreto, sus objetivos principales y las medidas más relevantes.\n\n"
         + (texto or "")
     )
 
-    # Ajustes de salida y seguridad (puedes relajarlos si ves bloqueos injustificados)
-    gen_config = {
+    generation_config = {
         "temperature": 0.2,
         "max_output_tokens": min(max_tokens, 700),
-        # Descomenta si sospechas de bloqueos de seguridad injustificados:
-        # "safety_settings": [
-        #     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-        #     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-        #     {"category": "HARM_CATEGORY_SEXUAL_CONTENT", "threshold": "BLOCK_NONE"},
-        #     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-        # ],
     }
 
+    # Si ves bloqueos injustificados, descomenta estas líneas:
+    # safety_settings = [
+    #     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+    #     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+    #     {"category": "HARM_CATEGORY_SEXUAL_CONTENT", "threshold": "BLOCK_NONE"},
+    #     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    # ]
+    safety_settings = None
+
     def _extract_text(resp):
-        """Devuelve texto desde varias rutas posibles del SDK."""
-        # 1) Camino directo
+        # 1) atajo
         try:
             if hasattr(resp, "text") and isinstance(resp.text, str) and resp.text.strip():
                 return resp.text.strip()
         except Exception:
             pass
-        # 2) Candidatos -> content.parts[*].text
+        # 2) candidates -> content.parts[*].text
         try:
-            cands = getattr(resp, "candidates", None) or []
-            for c in cands:
+            for c in getattr(resp, "candidates", []) or []:
                 content = getattr(c, "content", None)
                 parts = getattr(content, "parts", None) if content else None
                 if parts:
@@ -234,7 +235,7 @@ def resumir_con_gemini(texto, max_tokens=700, modelo="gemini-2.5-pro", debug=Fal
                         return "\n".join(trozos).strip()
         except Exception:
             pass
-        # 3) Algunas versiones exponen output_text
+        # 3) algunas versiones exponen output_text
         try:
             t = getattr(resp, "output_text", None)
             if isinstance(t, str) and t.strip():
@@ -244,59 +245,68 @@ def resumir_con_gemini(texto, max_tokens=700, modelo="gemini-2.5-pro", debug=Fal
         return None
 
     def _finish_info(resp):
-        """Intenta sacar razones de finalización y diagnósticos útiles."""
         try:
             info = []
-            cands = getattr(resp, "candidates", None) or []
-            for c in cands:
+            for c in getattr(resp, "candidates", []) or []:
                 fr = getattr(c, "finish_reason", None) or getattr(c, "finishReason", None)
-                if fr:
-                    info.append(f"finish_reason={fr}")
+                if fr: info.append(f"finish_reason={fr}")
                 sr = getattr(c, "safety_ratings", None) or getattr(c, "safetyRatings", None)
-                if sr:
-                    info.append(f"safety_ratings={sr}")
+                if sr: info.append(f"safety_ratings={sr}")
             return " | ".join(info) if info else None
         except Exception:
             return None
 
     def _call(modelo_activo, cfg):
-        return gclient.models.generate_content(
-            model=modelo_activo,
-            contents=prompt,
-            config=cfg
-        )
+        kwargs = {
+            "model": modelo_activo,
+            # Recomendado: pasar como lista de mensajes/parts
+            "contents": [
+                {
+                    "role": "system",
+                    "parts": [{"text": "Eres un experto legal que resume documentos de manera precisa."}]
+                },
+                {
+                    "role": "user",
+                    "parts": [{"text": prompt_usuario}]
+                }
+            ],
+            "generation_config": cfg
+        }
+        if safety_settings is not None:
+            kwargs["safety_settings"] = safety_settings
+        return gclient.models.generate_content(**kwargs)
 
     # 1) Intentos contra el modelo principal
     for intento in range(3):
         try:
-            resp = _call(modelo, gen_config)
+            resp = _call(modelo, generation_config)
             texto_out = _extract_text(resp)
             if texto_out:
                 return texto_out
-            # Sin texto: mostrar info de finish si existe
-            diag = _finish_info(resp)
-            if debug and diag:
-                st.info(f"Diagnóstico de respuesta (sin texto): {diag}")
-            # Si no hay texto pero tampoco excepción, no reintentes en bucle: informa
-            return "⚠️ El modelo no devolvió texto. Puedes intentar con menos texto de entrada o activar 'debug=True' para diagnóstico."
+            if debug:
+                diag = _finish_info(resp)
+                if diag:
+                    st.info(f"Diagnóstico de respuesta (sin texto): {diag}")
+            # No lanzar excepción: devolver aviso útil
+            return "⚠️ El modelo no devolvió texto. Activa debug=True para ver detalles y/o prueba con 'models/gemini-2.5-flash'."
         except Exception as e:
             msg = str(e)
             if any(code in msg for code in [" 500", " 502", " 503", " 504", "INTERNAL", "UNAVAILABLE", "DEADLINE_EXCEEDED"]):
-                espera = (2 ** intento) + random.uniform(0, 0.5)
-                time.sleep(espera)
+                time.sleep((2 ** intento) + random.uniform(0, 0.5))
                 continue
             return f"❌ Error generando resumen con Gemini ({modelo}): {e}"
 
-    # 2) Fallback a un modelo rápido si Pro falla repetidamente
-    modelo_fallback = "gemini-2.5-flash"
+    # 2) Fallback a modelo rápido
+    modelo_fallback = "models/gemini-2.5-flash"
     try:
-        resp = _call(modelo_fallback, {**gen_config, "max_output_tokens": min(max_tokens, 600)})
+        resp = _call(modelo_fallback, {**generation_config, "max_output_tokens": min(max_tokens, 600)})
         texto_out = _extract_text(resp)
         if texto_out:
             return texto_out + "\n\n_(Generado con modelo de respaldo: gemini-2.5-flash)_"
-        diag = _finish_info(resp)
-        if debug and diag:
-            st.info(f"Diagnóstico (fallback sin texto): {diag}")
+        if debug:
+            diag = _finish_info(resp)
+            if diag:
+                st.info(f"Diagnóstico (fallback sin texto): {diag}")
         return "⚠️ El modelo de respaldo no devolvió texto. Prueba con un texto más corto."
     except Exception as e2:
         return f"❌ Error con el modelo de respaldo ({modelo_fallback}): {e2}"
