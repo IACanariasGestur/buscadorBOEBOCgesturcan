@@ -182,15 +182,16 @@ def extraer_texto_completo_desde_url(url):
         return f"❌ Error al extraer texto completo: {e}"
 
 # --- Función para resumir con Gemini ---
+from google.genai import types  # asegúrate de tener este import
+
 import time
 import random
 
 def resumir_con_gemini(texto, max_tokens=700, modelo="gemini-2.5-pro", debug=False):
     """
     Resumen legal en español con el SDK oficial de Gemini (google-genai).
-    - Config simple (sin safety_settings).
-    - Reintenta 5xx y hace fallback a 'gemini-2.5-flash'.
-    - Fuerza salida en texto plano.
+    - Reintenta 5xx y hace fallback a 'gemini-2.5-flash' si no hay texto.
+    - Sin safety_settings. Fuerza salida en texto plano.
     """
     prompt_usuario = (
         "Resume de forma clara, directa y en español el siguiente contenido legal. "
@@ -256,37 +257,45 @@ def resumir_con_gemini(texto, max_tokens=700, modelo="gemini-2.5-pro", debug=Fal
 
     max_out_main = min(max_tokens, 700)
 
-    # 1) Intentos contra el modelo principal
+    # 1) Intentos contra el modelo principal (NO devolvemos temprano si viene vacío)
+    last_diag = None
     for intento in range(3):
         try:
             resp = _call(modelo, max_out_main)
             texto_out = _extract_text(resp)
             if texto_out:
                 return texto_out
+            # sin texto -> guardamos diagnóstico y seguimos intentando
             if debug:
                 diag = _finish_info(resp)
                 if diag:
+                    last_diag = diag
                     st.info(f"Diagnóstico de respuesta (sin texto): {diag}")
-            return "⚠️ El modelo no devolvió texto. Activa debug=True para ver detalles y/o prueba con 'gemini-2.5-flash'."
+            # breve backoff y otro intento
+            time.sleep(0.1 + 0.1 * intento)
+            continue
         except Exception as e:
             msg = str(e)
+            # Reintento solo ante errores transitorios
             if any(code in msg for code in [" 500", " 502", " 503", " 504", "INTERNAL", "UNAVAILABLE", "DEADLINE_EXCEEDED"]):
-                time.sleep((2 ** intento) + random.uniform(0, 0.5))
+                time.sleep((2 ** intento) * 0.25 + random.uniform(0, 0.25))
                 continue
-            return f"❌ Error generando resumen con Gemini ({modelo}): {e}"
+            # Error no transitorio: salimos a fallback
+            last_diag = f"excepción: {e}"
+            break
 
-    # 2) Fallback a modelo rápido
+    # 2) Fallback a modelo rápido SIEMPRE que no obtuvimos texto
     modelo_fallback = "gemini-2.5-flash"
     try:
         resp = _call(modelo_fallback, min(max_tokens, 600))
         texto_out = _extract_text(resp)
         if texto_out:
             return texto_out + "\n\n_(Generado con modelo de respaldo: gemini-2.5-flash)_"
-        if debug:
-            diag = _finish_info(resp)
-            if diag:
-                st.info(f"Diagnóstico (fallback sin texto): {diag}")
-        return "⚠️ El modelo de respaldo no devolvió texto. Prueba con un texto más corto."
+        # si tampoco hay texto, devolvemos info útil
+        diag = _finish_info(resp) or last_diag
+        if debug and diag:
+            st.info(f"Diagnóstico (fallback sin texto): {diag}")
+        return "⚠️ No se obtuvo texto ni del modelo principal ni del fallback. Prueba con un texto más corto."
     except Exception as e2:
         return f"❌ Error con el modelo de respaldo ({modelo_fallback}): {e2}"
 
