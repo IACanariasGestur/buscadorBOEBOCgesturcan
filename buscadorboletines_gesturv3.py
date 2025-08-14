@@ -184,11 +184,12 @@ def extraer_texto_completo_desde_url(url):
 import time
 import random
 
-def resumir_con_gemini(texto, max_tokens=700, modelo="gemini-2.5-pro"):
+def resumir_con_gemini(texto, max_tokens=700, modelo="gemini-2.5-pro", debug=False):
     """
     Resumen legal en español con el SDK oficial de Gemini.
-    - Reintenta en caso de errores 5xx.
-    - Hace fallback a 'gemini-2.5-flash' si 'pro' falla repetidamente.
+    - Extrae texto de resp.text o de resp.candidates[*].content.parts[*].text.
+    - Muestra razón de finalización si no hay texto (p.ej., SAFETY).
+    - Reintenta en 5xx y hace fallback a 'gemini-2.5-flash'.
     """
     prompt = (
         "Resume de forma clara, directa y en español el siguiente contenido legal. "
@@ -196,46 +197,107 @@ def resumir_con_gemini(texto, max_tokens=700, modelo="gemini-2.5-pro"):
         + (texto or "")
     )
 
-    def _call(modelo_activo, max_out):
-        # Petición mínima y estable
+    # Ajustes de salida y seguridad (puedes relajarlos si ves bloqueos injustificados)
+    gen_config = {
+        "temperature": 0.2,
+        "max_output_tokens": min(max_tokens, 700),
+        # Descomenta si sospechas de bloqueos de seguridad injustificados:
+        # "safety_settings": [
+        #     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        #     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        #     {"category": "HARM_CATEGORY_SEXUAL_CONTENT", "threshold": "BLOCK_NONE"},
+        #     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        # ],
+    }
+
+    def _extract_text(resp):
+        """Devuelve texto desde varias rutas posibles del SDK."""
+        # 1) Camino directo
+        try:
+            if hasattr(resp, "text") and isinstance(resp.text, str) and resp.text.strip():
+                return resp.text.strip()
+        except Exception:
+            pass
+        # 2) Candidatos -> content.parts[*].text
+        try:
+            cands = getattr(resp, "candidates", None) or []
+            for c in cands:
+                content = getattr(c, "content", None)
+                parts = getattr(content, "parts", None) if content else None
+                if parts:
+                    trozos = []
+                    for p in parts:
+                        t = getattr(p, "text", None)
+                        if isinstance(t, str) and t.strip():
+                            trozos.append(t.strip())
+                    if trozos:
+                        return "\n".join(trozos).strip()
+        except Exception:
+            pass
+        # 3) Algunas versiones exponen output_text
+        try:
+            t = getattr(resp, "output_text", None)
+            if isinstance(t, str) and t.strip():
+                return t.strip()
+        except Exception:
+            pass
+        return None
+
+    def _finish_info(resp):
+        """Intenta sacar razones de finalización y diagnósticos útiles."""
+        try:
+            info = []
+            cands = getattr(resp, "candidates", None) or []
+            for c in cands:
+                fr = getattr(c, "finish_reason", None) or getattr(c, "finishReason", None)
+                if fr:
+                    info.append(f"finish_reason={fr}")
+                sr = getattr(c, "safety_ratings", None) or getattr(c, "safetyRatings", None)
+                if sr:
+                    info.append(f"safety_ratings={sr}")
+            return " | ".join(info) if info else None
+        except Exception:
+            return None
+
+    def _call(modelo_activo, cfg):
         return gclient.models.generate_content(
             model=modelo_activo,
             contents=prompt,
-            config={
-                "temperature": 0.2,
-                "max_output_tokens": max_out
-            }
+            config=cfg
         )
 
-    # 1) Intentos contra el modelo principal (hasta 3)
+    # 1) Intentos contra el modelo principal
     for intento in range(3):
         try:
-            resp = _call(modelo, min(max_tokens, 700))  # tope prudente
-            resumen = (resp.text or "").strip()
-            if resumen:
-                return resumen
-            else:
-                # Si no hay texto, no tires la app: devuelve aviso útil
-                return "⚠️ El modelo no devolvió texto. Prueba a reducir el tamaño del documento o a intentarlo de nuevo."
+            resp = _call(modelo, gen_config)
+            texto_out = _extract_text(resp)
+            if texto_out:
+                return texto_out
+            # Sin texto: mostrar info de finish si existe
+            diag = _finish_info(resp)
+            if debug and diag:
+                st.info(f"Diagnóstico de respuesta (sin texto): {diag}")
+            # Si no hay texto pero tampoco excepción, no reintentes en bucle: informa
+            return "⚠️ El modelo no devolvió texto. Puedes intentar con menos texto de entrada o activar 'debug=True' para diagnóstico."
         except Exception as e:
-            # Retry solo si parece 5xx o error transitorio
             msg = str(e)
             if any(code in msg for code in [" 500", " 502", " 503", " 504", "INTERNAL", "UNAVAILABLE", "DEADLINE_EXCEEDED"]):
-                # Backoff exponencial con jitter
                 espera = (2 ** intento) + random.uniform(0, 0.5)
                 time.sleep(espera)
                 continue
-            # Otros errores: informa y corta
             return f"❌ Error generando resumen con Gemini ({modelo}): {e}"
 
-    # 2) Fallback automático a un modelo rápido si Pro insiste en fallar
+    # 2) Fallback a un modelo rápido si Pro falla repetidamente
     modelo_fallback = "gemini-2.5-flash"
     try:
-        resp = _call(modelo_fallback, min(max_tokens, 600))
-        resumen = (resp.text or "").strip()
-        if resumen:
-            return resumen + "\n\n_(Generado con modelo de respaldo: gemini-2.5-flash)_"
-        return "⚠️ El modelo de respaldo no devolvió texto. Intenta con un texto más corto."
+        resp = _call(modelo_fallback, {**gen_config, "max_output_tokens": min(max_tokens, 600)})
+        texto_out = _extract_text(resp)
+        if texto_out:
+            return texto_out + "\n\n_(Generado con modelo de respaldo: gemini-2.5-flash)_"
+        diag = _finish_info(resp)
+        if debug and diag:
+            st.info(f"Diagnóstico (fallback sin texto): {diag}")
+        return "⚠️ El modelo de respaldo no devolvió texto. Prueba con un texto más corto."
     except Exception as e2:
         return f"❌ Error con el modelo de respaldo ({modelo_fallback}): {e2}"
 
