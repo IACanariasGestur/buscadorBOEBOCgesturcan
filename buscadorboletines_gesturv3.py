@@ -23,47 +23,28 @@ tz_canarias = pytz.timezone("Atlantic/Canary")
 hoy_madrid = datetime.now(tz_madrid).date()
 hoy_canarias = datetime.now(tz_canarias).date()
 
-# --- Groq: obtener clave (IMPORTANTE: strip para eliminar \n/espacios) ---
-API_KEY = st.secrets["GROQ_API_KEY"].strip()
-client = OpenAI(api_key=API_KEY, base_url="https://api.groq.com/openai/v1")
+# --- Gemini: obtener clave (IMPORTANTE: strip para eliminar \n/espacios) ---
+GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"].strip()
+
+from openai import OpenAI
+client = OpenAI(
+    api_key=GEMINI_API_KEY,
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+)
 
 # Test rápido: confirma que la clave funciona en esta app
-if "groq_checked" not in st.session_state:
+if "gemini_checked" not in st.session_state:
     try:
         r = requests.get(
-            "https://api.groq.com/openai/v1/models",
-            headers={"Authorization": f"Bearer {API_KEY}"},
+            "https://generativelanguage.googleapis.com/v1beta/openai/models",
+            headers={"Authorization": f"Bearer {GEMINI_API_KEY}"},
             timeout=15
         )
-        st.session_state.groq_checked = (r.status_code, r.text[:200])
+        st.session_state.gemini_checked = (r.status_code, r.text[:200])
         if r.status_code != 200:
-            st.error(f"Groq /models devolvió {r.status_code}. Revisa el secreto (puede tener espacios o \n).")
+            st.error("Gemini /models no respondió 200. Revisa el secreto GEMINI_API_KEY.")
     except Exception as e:
-        st.error(f"Error comprobando Groq: {e}")
-
-# ---------------------------------------------------------
-# ... tu código igual que antes ...
-# ---------------------------------------------------------
-
-def resumir_con_groq(texto, max_tokens=700):
-    try:
-        prompt = (
-            "Resume de forma clara, directa y en español el siguiente contenido legal. "
-            "Incluye el motivo del decreto, sus objetivos principales y las medidas más relevantes."
-            "\n\n" + texto
-        )
-        resp = client.chat.completions.create(
-            model="llama3-8b-8192",     # usa uno de los que te listó /models
-            messages=[
-                {"role": "system", "content": "Eres un experto legal que resume documentos de manera precisa."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2,
-            max_tokens=max_tokens,
-        )
-        return resp.choices[0].message.content.strip()
-    except Exception as e:
-        return f"❌ Error generando resumen con Groq: {e}"
+        st.error(f"Error comprobando Gemini: {e}")
 
 # --- Funciones BOE ---
 def obtener_boe_reciente():
@@ -210,26 +191,27 @@ def extraer_texto_completo_desde_url(url):
     except Exception as e:
         return f"❌ Error al extraer texto completo: {e}"
 
-# --- Función para resumir con Groq (usa Llama3) ---
-def resumir_con_groq(texto, max_tokens=700):
+# --- Función para resumir con Gemini ---
+def resumir_con_gemini(texto, max_tokens=700, reasoning_effort="low"):
     try:
         prompt = (
             "Resume de forma clara, directa y en español el siguiente contenido legal. "
-            "Incluye el motivo del decreto, sus objetivos principales y las medidas más relevantes."
-            "\n\n" + texto
+            "Incluye el motivo del decreto, sus objetivos principales y las medidas más relevantes.\n\n"
+            + texto
         )
         resp = client.chat.completions.create(
-            model="llama3-8b-8192",     # usa uno de los que te listó /models
+            model="gemini-2.5-pro",
             messages=[
                 {"role": "system", "content": "Eres un experto legal que resume documentos de manera precisa."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.2,
             max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort  # control pensado para modelos 2.5
         )
         return resp.choices[0].message.content.strip()
     except Exception as e:
-        return f"❌ Error generando resumen con Groq: {e}"
+        return f"❌ Error generando resumen con Gemini: {e}"
 
 # --- Cargar boletines al iniciar (cache) ---
 @st.cache_data(show_spinner="Cargando boletines...")
@@ -327,8 +309,8 @@ elif accion == "📝 Resumir por número":
                         st.info(f"✂️ Texto recortado a {max_palabras} palabras para no superar el límite del modelo.")
                     else:
                         texto_para_modelo = texto_completo
-                    with st.spinner("⏳ Resumiendo con Groq..."):
-                        resumen = resumir_con_groq(texto_para_modelo)
+                    with st.spinner("⏳ Resumiendo con Gemini 2.5 Pro..."):
+                        resumen = resumir_con_gemini(texto_para_modelo)
                     st.markdown("#### 📃 RESUMEN GENERADO")
                     st.write(resumen)
             else:
