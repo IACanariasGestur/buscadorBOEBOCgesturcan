@@ -182,122 +182,120 @@ def extraer_texto_completo_desde_url(url):
         return f"❌ Error al extraer texto completo: {e}"
 
 # --- Función para resumir con Gemini ---
-from google.genai import types  # asegúrate de tener este import
-
 import time
 import random
+import json
 
 def resumir_con_gemini(texto, max_tokens=700, modelo="gemini-2.5-pro", debug=False):
     """
-    Resumen legal en español con el SDK oficial de Gemini (google-genai).
-    - Reintenta 5xx y hace fallback a 'gemini-2.5-flash' si no hay texto.
-    - Sin safety_settings. Fuerza salida en texto plano.
+    Resumen legal en español llamando al endpoint REST directo de Gemini.
+    - Robusto frente a cambios del SDK.
+    - Fallback automático de '...-pro' a '...-flash'.
+    - Devuelve diagnósticos útiles si hay bloqueo o error.
     """
+    if not GEMINI_API_KEY:
+        return "❌ Falta GEMINI_API_KEY en secrets."
+
     prompt_usuario = (
         "Resume de forma clara, directa y en español el siguiente contenido legal. "
         "Incluye el motivo del decreto, sus objetivos principales y las medidas más relevantes.\n\n"
         + (texto or "")
     )
 
-    def _extract_text(resp):
+    def _model_path(name: str) -> str:
+        return name if name.startswith("models/") else f"models/{name}"
+
+    def _extract_text(data: dict):
         try:
-            if hasattr(resp, "text") and isinstance(resp.text, str) and resp.text.strip():
-                return resp.text.strip()
-        except Exception:
-            pass
-        try:
-            for c in getattr(resp, "candidates", []) or []:
-                content = getattr(c, "content", None)
-                parts = getattr(content, "parts", None) if content else None
-                if parts:
-                    trozos = []
-                    for p in parts:
-                        t = getattr(p, "text", None)
-                        if isinstance(t, str) and t.strip():
-                            trozos.append(t.strip())
-                    if trozos:
-                        return "\n".join(trozos).strip()
-        except Exception:
-            pass
-        try:
-            t = getattr(resp, "output_text", None)
-            if isinstance(t, str) and t.strip():
-                return t.strip()
+            for c in data.get("candidates", []) or []:
+                parts = (c.get("content") or {}).get("parts") or []
+                texts = [p.get("text", "").strip() for p in parts if isinstance(p, dict) and p.get("text")]
+                if texts:
+                    return "\n".join(t for t in texts if t)
         except Exception:
             pass
         return None
 
-    def _finish_info(resp):
+    def _finish_info(data: dict):
         try:
-            info = []
-            for c in getattr(resp, "candidates", []) or []:
-                fr = getattr(c, "finish_reason", None) or getattr(c, "finishReason", None)
-                if fr: info.append(f"finish_reason={fr}")
-                sr = getattr(c, "safety_ratings", None) or getattr(c, "safetyRatings", None)
-                if sr: info.append(f"safety_ratings={sr}")
-            pf = getattr(resp, "prompt_feedback", None) or getattr(resp, "promptFeedback", None)
+            bits = []
+            pf = data.get("promptFeedback") or data.get("prompt_feedback")
             if pf:
-                br = getattr(pf, "block_reason", None) or getattr(pf, "blockReason", None)
-                if br: info.append(f"prompt_block_reason={br}")
-            return " | ".join(info) if info else None
+                br = pf.get("blockReason") or pf.get("block_reason")
+                if br: bits.append(f"prompt_block_reason={br}")
+            for c in data.get("candidates", []) or []:
+                fr = c.get("finishReason") or c.get("finish_reason")
+                if fr: bits.append(f"finish_reason={fr}")
+            return " | ".join(bits) if bits else None
         except Exception:
             return None
 
-    def _call(modelo_activo, max_out):
-        return gclient.models.generate_content(
-            model=modelo_activo,          # "gemini-2.5-pro" o "models/gemini-2.5-pro"
-            contents=prompt_usuario,      # string directo
-            config=types.GenerateContentConfig(
-                temperature=0.2,
-                max_output_tokens=max_out,
-                system_instruction="Eres un experto legal que resume documentos de manera precisa.",
-                response_mime_type="text/plain",  # salida en texto plano
-            ),
-        )
-
-    max_out_main = min(max_tokens, 700)
-
-    # 1) Intentos contra el modelo principal (NO devolvemos temprano si viene vacío)
-    last_diag = None
-    for intento in range(3):
+    def _call(modelo_activo: str, max_out: int):
+        url = f"https://generativelanguage.googleapis.com/v1beta/{_model_path(modelo_activo)}:generateContent"
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": GEMINI_API_KEY,
+        }
+        payload = {
+            "contents": [
+                {"role": "user", "parts": [{"text": prompt_usuario}]}
+            ],
+            "systemInstruction": {
+                "role": "system",
+                "parts": [{"text": "Eres un experto legal que resume documentos de manera precisa."}]
+            },
+            "generationConfig": {
+                "temperature": 0.2,
+                "maxOutputTokens": int(min(max_tokens, max_out)),
+                "responseMimeType": "text/plain"
+            }
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
         try:
-            resp = _call(modelo, max_out_main)
-            texto_out = _extract_text(resp)
-            if texto_out:
-                return texto_out
-            # sin texto -> guardamos diagnóstico y seguimos intentando
-            if debug:
-                diag = _finish_info(resp)
-                if diag:
-                    last_diag = diag
-                    st.info(f"Diagnóstico de respuesta (sin texto): {diag}")
-            # breve backoff y otro intento
-            time.sleep(0.1 + 0.1 * intento)
-            continue
-        except Exception as e:
-            msg = str(e)
-            # Reintento solo ante errores transitorios
-            if any(code in msg for code in [" 500", " 502", " 503", " 504", "INTERNAL", "UNAVAILABLE", "DEADLINE_EXCEEDED"]):
-                time.sleep((2 ** intento) * 0.25 + random.uniform(0, 0.25))
-                continue
-            # Error no transitorio: salimos a fallback
-            last_diag = f"excepción: {e}"
-            break
+            data = resp.json()
+        except Exception:
+            data = {"error": {"message": f"Respuesta no JSON (status {resp.status_code})"}}
 
-    # 2) Fallback a modelo rápido SIEMPRE que no obtuvimos texto
-    modelo_fallback = "gemini-2.5-flash"
-    try:
-        resp = _call(modelo_fallback, min(max_tokens, 600))
-        texto_out = _extract_text(resp)
+        # Errores HTTP/servicio
+        if resp.status_code >= 400 or "error" in data:
+            err = data.get("error", {})
+            msg = err.get("message") or f"HTTP {resp.status_code}"
+            return None, f"{msg} (modelo={modelo_activo})", data
+
+        # Texto
+        texto_out = _extract_text(data)
+        if texto_out and texto_out.strip():
+            return texto_out.strip(), None, data
+
+        # Sin texto -> quizá bloqueado
+        diag = _finish_info(data)
+        return None, (diag or "sin_texto"), data
+
+    # 1) Modelo principal (hasta 2 intentos ligeros)
+    for intento in range(2):
+        texto_out, err, data = _call(modelo, 700)
         if texto_out:
-            return texto_out + "\n\n_(Generado con modelo de respaldo: gemini-2.5-flash)_"
-        # si tampoco hay texto, devolvemos info útil
-        diag = _finish_info(resp) or last_diag
-        if debug and diag:
-            st.info(f"Diagnóstico (fallback sin texto): {diag}")
-        return "⚠️ No se obtuvo texto ni del modelo principal ni del fallback. Prueba con un texto más corto."
-    except Exception as e2:
-        return f"❌ Error con el modelo de respaldo ({modelo_fallback}): {e2}"
+            return texto_out
+        # errores transitorios -> reintento rápido
+        if err and any(s in err for s in ["500", "502", "503", "504", "INTERNAL", "UNAVAILABLE", "DEADLINE_EXCEEDED"]):
+            time.sleep(0.2 + 0.2 * intento)
+            continue
+        # si viene "sin_texto" (p.ej. bloqueado), no nos quedamos aquí
+        break
+
+    # 2) Fallback a flash
+    modelo_fallback = "gemini-2.5-flash"
+    texto_out, err, data = _call(modelo_fallback, 600)
+    if texto_out:
+        return texto_out + "\n\n_(Generado con modelo de respaldo: gemini-2.5-flash)_"
+
+    # 3) Mensaje final con diagnóstico útil
+    diag = _finish_info(data) if isinstance(data, dict) else None
+    if debug and diag:
+        st.info(f"Diagnóstico: {diag}")
+    if diag and "prompt_block_reason" in diag:
+        return f"⚠️ Petición bloqueada por el modelo ({diag}). Prueba a recortar el texto, quitar encabezados y firmas, o reformular el prompt."
+    return f"⚠️ No se obtuvo texto ni del modelo principal ni del fallback. {('Detalle: ' + err) if err else ''}".strip()
 
 # --- Cargar boletines al iniciar (cache) ---
 @st.cache_data(show_spinner="Cargando boletines...")
