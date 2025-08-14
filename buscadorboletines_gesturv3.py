@@ -29,17 +29,9 @@ if not GEMINI_API_KEY:
 
 from google import genai
 
-# Cliente oficial Gemini
+# Cliente oficial Gemini (sin ping de red aquí)
 try:
     gclient = genai.Client(api_key=GEMINI_API_KEY)
-    if "gemini_checked" not in st.session_state:
-        # Ping mínimo para validar la clave y el modelo
-        _ = gclient.models.generate_content(
-            model="gemini-2.5-pro",
-            contents="ping",
-            config={"max_output_tokens": 1, "temperature": 0}
-        )
-        st.session_state.gemini_checked = ("OK", "gemini-2.5-pro respondió al ping")
 except Exception as e:
     st.error(f"Error inicializando el cliente de Gemini: {e}")
 
@@ -189,36 +181,63 @@ def extraer_texto_completo_desde_url(url):
         return f"❌ Error al extraer texto completo: {e}"
 
 # --- Función para resumir con Gemini ---
+import time
+import random
+
 def resumir_con_gemini(texto, max_tokens=700, modelo="gemini-2.5-pro"):
     """
-    Genera un resumen legal en español con el SDK oficial de Gemini.
-    Devuelve siempre texto plano (response.text).
+    Resumen legal en español con el SDK oficial de Gemini.
+    - Reintenta en caso de errores 5xx.
+    - Hace fallback a 'gemini-2.5-flash' si 'pro' falla repetidamente.
     """
-    try:
-        prompt = (
-            "Resume de forma clara, directa y en español el siguiente contenido legal. "
-            "Incluye el motivo del decreto, sus objetivos principales y las medidas más relevantes.\n\n"
-            + (texto or "")
-        )
+    prompt = (
+        "Resume de forma clara, directa y en español el siguiente contenido legal. "
+        "Incluye el motivo del decreto, sus objetivos principales y las medidas más relevantes.\n\n"
+        + (texto or "")
+    )
 
-        # Nota: en el SDK oficial, el límite de salida es `max_output_tokens`
-        resp = gclient.models.generate_content(
-            model=modelo,
+    def _call(modelo_activo, max_out):
+        # Petición mínima y estable
+        return gclient.models.generate_content(
+            model=modelo_activo,
             contents=prompt,
             config={
                 "temperature": 0.2,
-                "max_output_tokens": max_tokens
+                "max_output_tokens": max_out
             }
         )
 
-        # El SDK oficial expone el texto directamente
-        resumen = (resp.text or "").strip()
-        if not resumen:
-            return "⚠️ El modelo no devolvió texto. Verifica la clave, el modelo o el límite de tokens."
-        return resumen
+    # 1) Intentos contra el modelo principal (hasta 3)
+    for intento in range(3):
+        try:
+            resp = _call(modelo, min(max_tokens, 700))  # tope prudente
+            resumen = (resp.text or "").strip()
+            if resumen:
+                return resumen
+            else:
+                # Si no hay texto, no tires la app: devuelve aviso útil
+                return "⚠️ El modelo no devolvió texto. Prueba a reducir el tamaño del documento o a intentarlo de nuevo."
+        except Exception as e:
+            # Retry solo si parece 5xx o error transitorio
+            msg = str(e)
+            if any(code in msg for code in [" 500", " 502", " 503", " 504", "INTERNAL", "UNAVAILABLE", "DEADLINE_EXCEEDED"]):
+                # Backoff exponencial con jitter
+                espera = (2 ** intento) + random.uniform(0, 0.5)
+                time.sleep(espera)
+                continue
+            # Otros errores: informa y corta
+            return f"❌ Error generando resumen con Gemini ({modelo}): {e}"
 
-    except Exception as e:
-        return f"❌ Error generando resumen con Gemini: {e}"
+    # 2) Fallback automático a un modelo rápido si Pro insiste en fallar
+    modelo_fallback = "gemini-2.5-flash"
+    try:
+        resp = _call(modelo_fallback, min(max_tokens, 600))
+        resumen = (resp.text or "").strip()
+        if resumen:
+            return resumen + "\n\n_(Generado con modelo de respaldo: gemini-2.5-flash)_"
+        return "⚠️ El modelo de respaldo no devolvió texto. Intenta con un texto más corto."
+    except Exception as e2:
+        return f"❌ Error con el modelo de respaldo ({modelo_fallback}): {e2}"
 
 # --- Cargar boletines al iniciar (cache) ---
 @st.cache_data(show_spinner="Cargando boletines...")
