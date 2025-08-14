@@ -28,6 +28,7 @@ if not GEMINI_API_KEY:
     st.error("Falta GEMINI_API_KEY en secrets.")
 
 from google import genai
+from google.genai import types
 
 # Cliente oficial Gemini (sin ping de red aquí)
 try:
@@ -184,14 +185,12 @@ def extraer_texto_completo_desde_url(url):
 import time
 import random
 
-def resumir_con_gemini(texto, max_tokens=700, modelo="models/gemini-2.5-pro", debug=False):
+def resumir_con_gemini(texto, max_tokens=700, modelo="gemini-2.5-pro", debug=False):
     """
     Resumen legal en español con el SDK oficial de Gemini (google-genai).
-    - Usa resource name completo del modelo: "models/gemini-2.5-pro".
-    - Envía contents como lista de mensajes/parts.
+    - Envía contents como lista de mensajes/parts o string.
     - Extrae texto de resp.text o de candidates[*].content.parts[*].text.
-    - Muestra finish_reason/safety si no hay texto.
-    - Reintenta 5xx y hace fallback a 'models/gemini-2.5-flash'.
+    - Reintenta 5xx y hace fallback a 'gemini-2.5-flash'.
     """
     prompt_usuario = (
         "Resume de forma clara, directa y en español el siguiente contenido legal. "
@@ -204,23 +203,16 @@ def resumir_con_gemini(texto, max_tokens=700, modelo="models/gemini-2.5-pro", de
         "max_output_tokens": min(max_tokens, 700),
     }
 
-    # Si ves bloqueos injustificados, descomenta estas líneas:
-    # safety_settings = [
-    #     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-    #     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-    #     {"category": "HARM_CATEGORY_SEXUAL_CONTENT", "threshold": "BLOCK_NONE"},
-    #     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-    # ]
+    # Si quieres forzar umbrales, muévelos dentro de config (ver comentario en _call)
+    # safety_settings = [...]
     safety_settings = None
 
     def _extract_text(resp):
-        # 1) atajo
         try:
             if hasattr(resp, "text") and isinstance(resp.text, str) and resp.text.strip():
                 return resp.text.strip()
         except Exception:
             pass
-        # 2) candidates -> content.parts[*].text
         try:
             for c in getattr(resp, "candidates", []) or []:
                 content = getattr(c, "content", None)
@@ -235,7 +227,6 @@ def resumir_con_gemini(texto, max_tokens=700, modelo="models/gemini-2.5-pro", de
                         return "\n".join(trozos).strip()
         except Exception:
             pass
-        # 3) algunas versiones exponen output_text
         try:
             t = getattr(resp, "output_text", None)
             if isinstance(t, str) and t.strip():
@@ -257,24 +248,20 @@ def resumir_con_gemini(texto, max_tokens=700, modelo="models/gemini-2.5-pro", de
             return None
 
     def _call(modelo_activo, cfg):
-        kwargs = {
-            "model": modelo_activo,
-            # Recomendado: pasar como lista de mensajes/parts
-            "contents": [
-                {
-                    "role": "system",
-                    "parts": [{"text": "Eres un experto legal que resume documentos de manera precisa."}]
-                },
-                {
-                    "role": "user",
-                    "parts": [{"text": prompt_usuario}]
-                }
-            ],
-            "generation_config": cfg
-        }
-        if safety_settings is not None:
-            kwargs["safety_settings"] = safety_settings
-        return gclient.models.generate_content(**kwargs)
+        # Si activas safety_settings, colócalos dentro de GenerateContentConfig(...)
+        return gclient.models.generate_content(
+            model=modelo_activo,
+            contents=[{"role": "user", "parts": [{"text": prompt_usuario}]}],
+            config=types.GenerateContentConfig(
+                temperature=cfg.get("temperature", 0.2),
+                max_output_tokens=cfg.get("max_output_tokens", 700),
+                system_instruction="Eres un experto legal que resume documentos de manera precisa.",
+                # safety_settings=[
+                #     types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                #     ...
+                # ],
+            ),
+        )
 
     # 1) Intentos contra el modelo principal
     for intento in range(3):
@@ -287,8 +274,7 @@ def resumir_con_gemini(texto, max_tokens=700, modelo="models/gemini-2.5-pro", de
                 diag = _finish_info(resp)
                 if diag:
                     st.info(f"Diagnóstico de respuesta (sin texto): {diag}")
-            # No lanzar excepción: devolver aviso útil
-            return "⚠️ El modelo no devolvió texto. Activa debug=True para ver detalles y/o prueba con 'models/gemini-2.5-flash'."
+            return "⚠️ El modelo no devolvió texto. Activa debug=True para ver detalles y/o prueba con 'gemini-2.5-flash'."
         except Exception as e:
             msg = str(e)
             if any(code in msg for code in [" 500", " 502", " 503", " 504", "INTERNAL", "UNAVAILABLE", "DEADLINE_EXCEEDED"]):
@@ -297,7 +283,7 @@ def resumir_con_gemini(texto, max_tokens=700, modelo="models/gemini-2.5-pro", de
             return f"❌ Error generando resumen con Gemini ({modelo}): {e}"
 
     # 2) Fallback a modelo rápido
-    modelo_fallback = "models/gemini-2.5-flash"
+    modelo_fallback = "gemini-2.5-flash"
     try:
         resp = _call(modelo_fallback, {**generation_config, "max_output_tokens": min(max_tokens, 600)})
         texto_out = _extract_text(resp)
