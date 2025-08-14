@@ -24,7 +24,9 @@ hoy_madrid = datetime.now(tz_madrid).date()
 hoy_canarias = datetime.now(tz_canarias).date()
 
 # --- Gemini: obtener clave (IMPORTANTE: strip para eliminar \n/espacios) ---
-GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"].strip()
+GEMINI_API_KEY = (st.secrets.get("GEMINI_API_KEY") or "").strip()
+if not GEMINI_API_KEY:
+    st.error("Falta GEMINI_API_KEY en secrets.")
 
 from openai import OpenAI
 client = OpenAI(
@@ -192,13 +194,18 @@ def extraer_texto_completo_desde_url(url):
         return f"❌ Error al extraer texto completo: {e}"
 
 # --- Función para resumir con Gemini ---
-def resumir_con_gemini(texto, max_tokens=700, reasoning_effort="low"):
+def resumir_con_gemini(texto, max_tokens=700, reasoning_effort="low", debug=False):
+    """
+    Genera un resumen legal claro en español con Gemini 2.5 Pro (OpenAI-compatible).
+    Robusta ante message.content None o contenido en lista.
+    """
     try:
         prompt = (
             "Resume de forma clara, directa y en español el siguiente contenido legal. "
             "Incluye el motivo del decreto, sus objetivos principales y las medidas más relevantes.\n\n"
-            + texto
+            + (texto or "")
         )
+
         resp = client.chat.completions.create(
             model="gemini-2.5-pro",
             messages=[
@@ -207,9 +214,56 @@ def resumir_con_gemini(texto, max_tokens=700, reasoning_effort="low"):
             ],
             temperature=0.2,
             max_tokens=max_tokens,
-            reasoning_effort=reasoning_effort  # control pensado para modelos 2.5
+            reasoning_effort=reasoning_effort
         )
-        return resp.choices[0].message.content.strip()
+
+        # --- Extracción robusta del contenido ---
+        def _as_text(x):
+            if isinstance(x, str):
+                return x
+            if isinstance(x, list):
+                partes = []
+                for p in x:
+                    # algunos backends devuelven [{"type":"text","text":"..."}]
+                    if isinstance(p, dict) and "text" in p:
+                        partes.append(p["text"])
+                    else:
+                        partes.append(str(p))
+                return "".join(partes)
+            return None
+
+        texto_resumen = None
+
+        # 1) Formato OpenAI estándar
+        try:
+            msg = resp.choices[0].message
+            content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+            texto_resumen = _as_text(content)
+        except Exception:
+            pass
+
+        # 2) Alternativa: choices[0].text
+        if not texto_resumen:
+            try:
+                ch0 = resp.choices[0]
+                alt = ch0.get("text") if isinstance(ch0, dict) else getattr(ch0, "text", None)
+                if isinstance(alt, str):
+                    texto_resumen = alt
+            except Exception:
+                pass
+
+        # 3) Si sigue vacío, mensaje útil
+        if not texto_resumen:
+            if debug:
+                import json
+                try:
+                    st.code(json.dumps(resp.model_dump(), ensure_ascii=False)[:2000])
+                except Exception:
+                    st.write(resp)
+            return "⚠️ No se pudo extraer texto del modelo. Revisa el modelo/base_url o activa debug=True para inspeccionar la respuesta."
+
+        return texto_resumen.strip()
+
     except Exception as e:
         return f"❌ Error generando resumen con Gemini: {e}"
 
@@ -293,7 +347,7 @@ elif accion == "📝 Resumir por número":
             num = int(num_str)
             anuncio = next((r for r in resultados_totales if r["n_original"] == num), None)
             if anuncio is not None:
-                st.markdown(f"### 📰 {anuncio.get('titulo', '').strip()}")
+                st.markdown(f"### 📰 {(anuncio.get('titulo') or '').strip()}")
                 st.markdown(f"🔗 [Ver boletín completo]({anuncio.get('url', '')})")
                 with st.spinner("📡 Obteniendo texto completo del enlace..."):
                     texto_completo = extraer_texto_completo_desde_url(anuncio['url'])
