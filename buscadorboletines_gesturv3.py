@@ -33,9 +33,13 @@ from google import genai
 try:
     gclient = genai.Client(api_key=GEMINI_API_KEY)
     if "gemini_checked" not in st.session_state:
-        # ping muy ligero para validar la clave (lista un modelo concreto)
-        _ = gclient.models.get("gemini-2.5-pro")
-        st.session_state.gemini_checked = ("OK", "gemini-2.5-pro disponible")
+        # Ping mínimo para validar la clave y el modelo
+        _ = gclient.models.generate_content(
+            model="gemini-2.5-pro",
+            contents="ping",
+            config={"max_output_tokens": 1, "temperature": 0}
+        )
+        st.session_state.gemini_checked = ("OK", "gemini-2.5-pro respondió al ping")
 except Exception as e:
     st.error(f"Error inicializando el cliente de Gemini: {e}")
 
