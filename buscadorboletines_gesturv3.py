@@ -185,22 +185,39 @@ def extraer_texto_completo_desde_url(url):
 import time
 import random
 import json
+import math
 
-def resumir_con_gemini(texto, max_tokens=700, modelo="gemini-2.5-pro", debug=False):
+def _partir_texto(texto:str, max_chars:int=12000):
+    # Partir por párrafos para no romper demasiado el contexto
+    paras = re.split(r'\n{2,}', texto)
+    trozos = []
+    actual = ""
+    for p in paras:
+        if len(actual) + len(p) + 2 <= max_chars:
+            actual += (("\n\n" if actual else "") + p)
+        else:
+            if actual: trozos.append(actual)
+            # si el párrafo es gigante, lo partimos duro
+            if len(p) > max_chars:
+                for i in range(0, len(p), max_chars):
+                    trozos.append(p[i:i+max_chars])
+                actual = ""
+            else:
+                actual = p
+    if actual:
+        trozos.append(actual)
+    return trozos
+
+def resumir_con_gemini(texto, modelo_principal="gemini-2.5-pro", modelo_respaldo="gemini-2.5-flash",
+                       max_tokens_por_bloque=600, timeout_s=60, debug=False):
     """
-    Resumen legal en español llamando al endpoint REST directo de Gemini.
-    - Robusto frente a cambios del SDK.
-    - Fallback automático de '...-pro' a '...-flash'.
-    - Devuelve diagnósticos útiles si hay bloqueo o error.
+    Resumen robusto por chunks con Gemini:
+    - Divide contenido en trozos manejables (max_chars≈12k).
+    - Resume cada trozo con reintentos ligeros.
+    - Luego hace un 'merge summary' final.
     """
     if not GEMINI_API_KEY:
         return "❌ Falta GEMINI_API_KEY en secrets."
-
-    prompt_usuario = (
-        "Resume de forma clara, directa y en español el siguiente contenido legal. "
-        "Incluye el motivo del decreto, sus objetivos principales y las medidas más relevantes.\n\n"
-        + (texto or "")
-    )
 
     def _model_path(name: str) -> str:
         return name if name.startswith("models/") else f"models/{name}"
@@ -230,73 +247,86 @@ def resumir_con_gemini(texto, max_tokens=700, modelo="gemini-2.5-pro", debug=Fal
         except Exception:
             return None
 
-    def _call(modelo_activo: str, max_out: int):
+    def _call_gemini(prompt_usuario: str, modelo_activo: str, max_out: int):
         url = f"https://generativelanguage.googleapis.com/v1beta/{_model_path(modelo_activo)}:generateContent"
-        headers = {
-            "Content-Type": "application/json",
-            "x-goog-api-key": GEMINI_API_KEY,
-        }
+        headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
         payload = {
-            "contents": [
-                {"role": "user", "parts": [{"text": prompt_usuario}]}
-            ],
+            "contents": [{"role": "user", "parts": [{"text": prompt_usuario}]}],
             "systemInstruction": {
                 "role": "system",
-                "parts": [{"text": "Eres un experto legal que resume documentos de manera precisa."}]
+                "parts": [{"text": "Eres un experto legal que resume documentos de manera precisa, clara y en español."}]
             },
             "generationConfig": {
                 "temperature": 0.2,
-                "maxOutputTokens": int(min(max_tokens, max_out)),
+                "maxOutputTokens": int(max_out),
                 "responseMimeType": "text/plain"
-            }
+            },
+            # safetySettings opcionales: permite algo más de holgura
+            "safetySettings": [
+                {"category":"HARM_CATEGORY_HARASSMENT","threshold":"BLOCK_MEDIUM_AND_ABOVE"},
+                {"category":"HARM_CATEGORY_HATE_SPEECH","threshold":"BLOCK_MEDIUM_AND_ABOVE"},
+                {"category":"HARM_CATEGORY_SEXUAL_CONTENT","threshold":"BLOCK_MEDIUM_AND_ABOVE"},
+                {"category":"HARM_CATEGORY_DANGEROUS_CONTENT","threshold":"BLOCK_MEDIUM_AND_ABOVE"},
+            ]
         }
-        resp = requests.post(url, headers=headers, json=payload, timeout=30)
         try:
-            data = resp.json()
-        except Exception:
-            data = {"error": {"message": f"Respuesta no JSON (status {resp.status_code})"}}
+            resp = requests.post(url, headers=headers, json=payload, timeout=timeout_s)
+            data = resp.json() if resp.headers.get("Content-Type","").startswith("application/json") else {"error":{"message":f"Respuesta no JSON (status {resp.status_code})"}}
+        except Exception as e:
+            return None, f"excepcion:{e}", None
 
-        # Errores HTTP/servicio
         if resp.status_code >= 400 or "error" in data:
-            err = data.get("error", {})
-            msg = err.get("message") or f"HTTP {resp.status_code}"
+            msg = (data.get("error") or {}).get("message") or f"HTTP {resp.status_code}"
             return None, f"{msg} (modelo={modelo_activo})", data
 
-        # Texto
         texto_out = _extract_text(data)
         if texto_out and texto_out.strip():
             return texto_out.strip(), None, data
 
-        # Sin texto -> quizá bloqueado
         diag = _finish_info(data)
         return None, (diag or "sin_texto"), data
 
-    # 1) Modelo principal (hasta 2 intentos ligeros)
-    for intento in range(2):
-        texto_out, err, data = _call(modelo, 700)
-        if texto_out:
-            return texto_out
-        # errores transitorios -> reintento rápido
-        if err and any(s in err for s in ["500", "502", "503", "504", "INTERNAL", "UNAVAILABLE", "DEADLINE_EXCEEDED"]):
-            time.sleep(0.2 + 0.2 * intento)
-            continue
-        # si viene "sin_texto" (p.ej. bloqueado), no nos quedamos aquí
-        break
+    def _intentar(prompt, preferido, respaldo, max_out):
+        # 2 intentos al principal si es error transitorio
+        for intento in range(2):
+            out, err, data = _call_gemini(prompt, preferido, max_out)
+            if out: return out
+            if err and any(s in err for s in ["500","502","503","504","INTERNAL","UNAVAILABLE","DEADLINE","excepcion"]):
+                time.sleep(0.3 + 0.3*intento)
+                continue
+            break
+        # fallback
+        out, err, data = _call_gemini(prompt, respaldo, max(300, int(max_out*0.8)))
+        if out: return out + "\n\n_(Generado con modelo de respaldo)_"
+        if debug and data:
+            st.info(f"Diagnóstico fallback: {_finish_info(data)}")
+        return None
 
-    # 2) Fallback a flash
-    modelo_fallback = "gemini-2.5-flash"
-    texto_out, err, data = _call(modelo_fallback, 600)
-    if texto_out:
-        return texto_out + "\n\n_(Generado con modelo de respaldo: gemini-2.5-flash)_"
+    # 1) Partimos y resumimos cada trozo
+    trozos = _partir_texto(texto, max_chars=12000)
+    res_parciales = []
+    for i, chunk in enumerate(trozos, 1):
+        prompt = (
+            "Resume de forma clara, directa y en español el siguiente contenido legal. "
+            "Incluye: motivo/objeto, objetivos principales, medidas clave, vigencia y efectos si aparecen. "
+            "Usa viñetas, sé conciso, evita citas textuales.\n\n"
+            f"=== CONTENIDO ({i}/{len(trozos)}) ===\n{chunk}"
+        )
+        parcial = _intentar(prompt, modelo_principal, modelo_respaldo, max_tokens_por_bloque)
+        if not parcial:
+            parcial = "⚠️ No se pudo resumir este bloque."
+        res_parciales.append(parcial)
 
-    # 3) Mensaje final con diagnóstico útil
-    diag = _finish_info(data) if isinstance(data, dict) else None
-    if debug and diag:
-        st.info(f"Diagnóstico: {diag}")
-    if diag and "prompt_block_reason" in diag:
-        return f"⚠️ Petición bloqueada por el modelo ({diag}). Prueba a recortar el texto, quitar encabezados y firmas, o reformular el prompt."
-    return f"⚠️ No se obtuvo texto ni del modelo principal ni del fallback. {('Detalle: ' + err) if err else ''}".strip()
-
+    # 2) Merge final
+    merge_prompt = (
+        "Integra en un único resumen ejecutivo en español los siguientes resúmenes parciales "
+        "(no repitas, no contradigas, estructura con apartados: Objeto, Ámbito, Medidas, Plazos, Obligaciones, "
+        "Ayudas/Subvenciones si aplica). Máximo ~350-500 palabras.\n\n" +
+        "\n\n---\n".join(res_parciales)
+    )
+    final = _intentar(merge_prompt, modelo_principal, modelo_respaldo, 700)
+    return final or "\n\n".join(res_parciales)
+                           
 # --- Cargar boletines al iniciar (cache) ---
 @st.cache_data(show_spinner="Cargando boletines...")
 def cargar_boletines_con_numeracion():
