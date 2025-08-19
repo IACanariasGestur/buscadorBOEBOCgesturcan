@@ -260,14 +260,7 @@ def resumir_con_gemini(texto, modelo_principal="gemini-2.5-pro", modelo_respaldo
                 "temperature": 0.2,
                 "maxOutputTokens": int(max_out),
                 "responseMimeType": "text/plain"
-            },
-            # safetySettings opcionales: permite algo más de holgura
-            "safetySettings": [
-                {"category":"HARM_CATEGORY_HARASSMENT","threshold":"BLOCK_ONLY_HIGH"},
-                {"category":"HARM_CATEGORY_HATE_SPEECH","threshold":"BLOCK_ONLY_HIGH"},
-                {"category":"HARM_CATEGORY_SEXUAL_CONTENT","threshold":"BLOCK_ONLY_HIGH"},
-                {"category":"HARM_CATEGORY_DANGEROUS_CONTENT","threshold":"BLOCK_ONLY_HIGH"},
-            ]
+            }
         }
         try:
             resp = requests.post(url, headers=headers, json=payload, timeout=timeout_s)
