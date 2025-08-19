@@ -209,7 +209,7 @@ def _partir_texto(texto:str, max_chars:int=12000):
     return trozos
 
 def resumir_con_gemini(texto, modelo_principal="gemini-2.5-pro", modelo_respaldo="gemini-2.5-flash",
-                       max_tokens_por_bloque=600, timeout_s=90, debug=False):
+                       max_tokens_por_bloque=512, timeout_s=90, debug=False):
     """
     Resumen robusto por chunks con Gemini:
     - Divide contenido en trozos manejables (max_chars≈12k).
@@ -279,50 +279,40 @@ def resumir_con_gemini(texto, modelo_principal="gemini-2.5-pro", modelo_respaldo
         diag = _finish_info(data)
         return None, (diag or "sin_texto"), data
 
-    def _intentar(prompt, preferido, respaldo, max_out):
-        ultimo_err = None
-        # 2 intentos al principal si es error transitorio
-        for intento in range(2):
-            out, err, data = _call_gemini(prompt, preferido, max_out)
-            if out:
-                return out, None
-            ultimo_err = err
-            if err and any(s in err for s in ["500","502","503","504","INTERNAL","UNAVAILABLE","DEADLINE","excepcion","429","rate"]):
-                time.sleep(0.3 + 0.3*intento)
-                continue
-            break
-        # fallback
-        out, err, data = _call_gemini(prompt, respaldo, max(300, int(max_out*0.8)))
+     def _intentar(prompt, preferido, respaldo, max_out):
+        """
+        Intenta con el modelo preferido; si devuelve MAX_TOKENS, reintenta con más tokens.
+        Si falla, usa fallback con un tope mayor.
+        """
+        def _try(modelo, max_tokens):
+            return _call_gemini(prompt, modelo, max_tokens)  # devuelve (out, err, data)
+    
+        # 1) Primer intento
+        out, err, data = _try(preferido, max_out)
         if out:
-            return out + "\n\n_(Generado con modelo de respaldo)_", None
-        return None, (err or ultimo_err or "sin_texto")                        
-
-    # 1) Partimos y resumimos cada trozo
-    trozos = _partir_texto(texto, max_chars=7000)
-    res_parciales = []
-    for i, chunk in enumerate(trozos, 1):
-        prompt = (
-            "Resume de forma clara, directa y en español el siguiente contenido legal. "
-            "Incluye: motivo/objeto, objetivos principales, medidas clave, vigencia y efectos si aparecen. "
-            "Usa viñetas, sé conciso, evita citas textuales.\n\n"
-            f"=== CONTENIDO ({i}/{len(trozos)}) ===\n{chunk}"
-        )
-        parcial, err = _intentar(prompt, modelo_principal, modelo_respaldo, max_tokens_por_bloque)
-        if not parcial:
-            msg = f"⚠️ No se pudo resumir este bloque. Motivo: {err or 'desconocido'}"
-            st.warning(f"Bloque {i}/{len(trozos)}: {msg}")
-            parcial = msg
-        res_parciales.append(parcial)
-
-    # 2) Merge final
-    merge_prompt = (
-        "Integra en un único resumen ejecutivo en español los siguientes resúmenes parciales "
-        "(no repitas, no contradigas, estructura con apartados: Objeto, Ámbito, Medidas, Plazos, Obligaciones, "
-        "Ayudas/Subvenciones si aplica). Máximo ~350-500 palabras.\n\n" +
-        "\n\n---\n".join(res_parciales)
-    )
-    final = _intentar(merge_prompt, modelo_principal, modelo_respaldo, 700)
-    return final or "\n\n".join(res_parciales)
+            return out, None
+    
+        # 2) Si fue MAX_TOKENS, subimos presupuesto y reintentamos una vez
+        if err and "MAX_TOKENS" in err:
+            out2, err2, data2 = _try(preferido, min(int(max_out * 2), 2048))
+            if out2:
+                return out2, None
+            err = err2 or err
+    
+        # 3) Reintento por errores transitorios
+        if err and any(s in err for s in ["500","502","503","504","INTERNAL","UNAVAILABLE","DEADLINE","excepcion","429","rate"]):
+            time.sleep(0.5)
+            out3, err3, data3 = _try(preferido, max_out)
+            if out3:
+                return out3, None
+            err = err3 or err
+    
+        # 4) Fallback
+        out4, err4, data4 = _try(respaldo, min(int(max_out * 1.2), 1536))
+        if out4:
+            return out4 + "\n\n_(Generado con modelo de respaldo)_", None
+    
+        return None, (err4 or err or "sin_texto")
                            
 # --- Cargar boletines al iniciar (cache) ---
 @st.cache_data(show_spinner="Cargando boletines...")
