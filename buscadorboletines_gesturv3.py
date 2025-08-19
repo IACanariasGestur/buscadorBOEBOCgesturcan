@@ -209,7 +209,7 @@ def _partir_texto(texto:str, max_chars:int=12000):
     return trozos
 
 def resumir_con_gemini(texto, modelo_principal="gemini-2.5-pro", modelo_respaldo="gemini-2.5-flash",
-                       max_tokens_por_bloque=600, timeout_s=60, debug=False):
+                       max_tokens_por_bloque=600, timeout_s=90, debug=False):
     """
     Resumen robusto por chunks con Gemini:
     - Divide contenido en trozos manejables (max_chars≈12k).
@@ -263,10 +263,10 @@ def resumir_con_gemini(texto, modelo_principal="gemini-2.5-pro", modelo_respaldo
             },
             # safetySettings opcionales: permite algo más de holgura
             "safetySettings": [
-                {"category":"HARM_CATEGORY_HARASSMENT","threshold":"BLOCK_MEDIUM_AND_ABOVE"},
-                {"category":"HARM_CATEGORY_HATE_SPEECH","threshold":"BLOCK_MEDIUM_AND_ABOVE"},
-                {"category":"HARM_CATEGORY_SEXUAL_CONTENT","threshold":"BLOCK_MEDIUM_AND_ABOVE"},
-                {"category":"HARM_CATEGORY_DANGEROUS_CONTENT","threshold":"BLOCK_MEDIUM_AND_ABOVE"},
+                {"category":"HARM_CATEGORY_HARASSMENT","threshold":"BLOCK_ONLY_HIGH"},
+                {"category":"HARM_CATEGORY_HATE_SPEECH","threshold":"BLOCK_ONLY_HIGH"},
+                {"category":"HARM_CATEGORY_SEXUAL_CONTENT","threshold":"BLOCK_ONLY_HIGH"},
+                {"category":"HARM_CATEGORY_DANGEROUS_CONTENT","threshold":"BLOCK_ONLY_HIGH"},
             ]
         }
         try:
@@ -287,23 +287,25 @@ def resumir_con_gemini(texto, modelo_principal="gemini-2.5-pro", modelo_respaldo
         return None, (diag or "sin_texto"), data
 
     def _intentar(prompt, preferido, respaldo, max_out):
+        ultimo_err = None
         # 2 intentos al principal si es error transitorio
         for intento in range(2):
             out, err, data = _call_gemini(prompt, preferido, max_out)
-            if out: return out
-            if err and any(s in err for s in ["500","502","503","504","INTERNAL","UNAVAILABLE","DEADLINE","excepcion"]):
+            if out:
+                return out, None
+            ultimo_err = err
+            if err and any(s in err for s in ["500","502","503","504","INTERNAL","UNAVAILABLE","DEADLINE","excepcion","429","rate"]):
                 time.sleep(0.3 + 0.3*intento)
                 continue
             break
         # fallback
         out, err, data = _call_gemini(prompt, respaldo, max(300, int(max_out*0.8)))
-        if out: return out + "\n\n_(Generado con modelo de respaldo)_"
-        if debug and data:
-            st.info(f"Diagnóstico fallback: {_finish_info(data)}")
-        return None
+        if out:
+            return out + "\n\n_(Generado con modelo de respaldo)_", None
+        return None, (err or ultimo_err or "sin_texto")                        
 
     # 1) Partimos y resumimos cada trozo
-    trozos = _partir_texto(texto, max_chars=12000)
+    trozos = _partir_texto(texto, max_chars=7000)
     res_parciales = []
     for i, chunk in enumerate(trozos, 1):
         prompt = (
@@ -312,9 +314,11 @@ def resumir_con_gemini(texto, modelo_principal="gemini-2.5-pro", modelo_respaldo
             "Usa viñetas, sé conciso, evita citas textuales.\n\n"
             f"=== CONTENIDO ({i}/{len(trozos)}) ===\n{chunk}"
         )
-        parcial = _intentar(prompt, modelo_principal, modelo_respaldo, max_tokens_por_bloque)
+        parcial, err = _intentar(prompt, modelo_principal, modelo_respaldo, max_tokens_por_bloque)
         if not parcial:
-            parcial = "⚠️ No se pudo resumir este bloque."
+            msg = f"⚠️ No se pudo resumir este bloque. Motivo: {err or 'desconocido'}"
+            st.warning(f"Bloque {i}/{len(trozos)}: {msg}")
+            parcial = msg
         res_parciales.append(parcial)
 
     # 2) Merge final
