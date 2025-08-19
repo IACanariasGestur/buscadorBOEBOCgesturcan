@@ -187,7 +187,7 @@ import random
 import json
 import math
 
-def _partir_texto(texto:str, max_chars:int=12000):
+def _partir_texto(texto: str, max_chars: int = 5000):
     # Partir por párrafos para no romper demasiado el contexto
     paras = re.split(r'\n{2,}', texto)
     trozos = []
@@ -196,7 +196,8 @@ def _partir_texto(texto:str, max_chars:int=12000):
         if len(actual) + len(p) + 2 <= max_chars:
             actual += (("\n\n" if actual else "") + p)
         else:
-            if actual: trozos.append(actual)
+            if actual:
+                trozos.append(actual)
             # si el párrafo es gigante, lo partimos duro
             if len(p) > max_chars:
                 for i in range(0, len(p), max_chars):
@@ -208,11 +209,15 @@ def _partir_texto(texto:str, max_chars:int=12000):
         trozos.append(actual)
     return trozos
 
-def resumir_con_gemini(texto, modelo_principal="gemini-2.5-pro", modelo_respaldo="gemini-2.5-flash",
-                       max_tokens_por_bloque=512, timeout_s=90, debug=False):
+def resumir_con_gemini(texto,
+                       modelo_principal: str = "gemini-2.5-pro",
+                       modelo_respaldo: str = "gemini-2.5-flash",
+                       max_tokens_por_bloque: int = 512,
+                       timeout_s: int = 90,
+                       debug: bool = False):
     """
     Resumen robusto por chunks con Gemini:
-    - Divide contenido en trozos manejables (max_chars≈12k).
+    - Divide contenido en trozos manejables (max_chars≈5k).
     - Resume cada trozo con reintentos ligeros.
     - Luego hace un 'merge summary' final.
     """
@@ -264,7 +269,7 @@ def resumir_con_gemini(texto, modelo_principal="gemini-2.5-pro", modelo_respaldo
         }
         try:
             resp = requests.post(url, headers=headers, json=payload, timeout=timeout_s)
-            data = resp.json() if resp.headers.get("Content-Type","").startswith("application/json") else {"error":{"message":f"Respuesta no JSON (status {resp.status_code})"}}
+            data = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {"error": {"message": f"Respuesta no JSON (status {resp.status_code})"}}
         except Exception as e:
             return None, f"excepcion:{e}", None
 
@@ -279,26 +284,26 @@ def resumir_con_gemini(texto, modelo_principal="gemini-2.5-pro", modelo_respaldo
         diag = _finish_info(data)
         return None, (diag or "sin_texto"), data
 
-     def _intentar(prompt, preferido, respaldo, max_out):
+    def _intentar(prompt, preferido, respaldo, max_out):
         """
         Intenta con el modelo preferido; si devuelve MAX_TOKENS, reintenta con más tokens.
         Si falla, usa fallback con un tope mayor.
         """
         def _try(modelo, max_tokens):
             return _call_gemini(prompt, modelo, max_tokens)  # devuelve (out, err, data)
-    
+
         # 1) Primer intento
         out, err, data = _try(preferido, max_out)
         if out:
             return out, None
-    
+
         # 2) Si fue MAX_TOKENS, subimos presupuesto y reintentamos una vez
         if err and "MAX_TOKENS" in err:
             out2, err2, data2 = _try(preferido, min(int(max_out * 2), 2048))
             if out2:
                 return out2, None
             err = err2 or err
-    
+
         # 3) Reintento por errores transitorios
         if err and any(s in err for s in ["500","502","503","504","INTERNAL","UNAVAILABLE","DEADLINE","excepcion","429","rate"]):
             time.sleep(0.5)
@@ -306,14 +311,46 @@ def resumir_con_gemini(texto, modelo_principal="gemini-2.5-pro", modelo_respaldo
             if out3:
                 return out3, None
             err = err3 or err
-    
+
         # 4) Fallback
         out4, err4, data4 = _try(respaldo, min(int(max_out * 1.2), 1536))
         if out4:
             return out4 + "\n\n_(Generado con modelo de respaldo)_", None
-    
+
         return None, (err4 or err or "sin_texto")
-                           
+
+    # 1) Partimos y resumimos cada trozo (5000 chars)
+    trozos = _partir_texto(texto, max_chars=5000)
+    res_parciales = []
+
+    for i, chunk in enumerate(trozos, 1):
+        prompt = (
+            "Resume de forma clara, directa y en español el siguiente contenido legal. "
+            "Incluye: motivo/objeto, objetivos principales, medidas clave, plazos/vigencia y efectos si aparecen. "
+            "Usa viñetas, sé conciso y evita citas textuales. Máximo 120–180 palabras por bloque.\n\n"
+            f"=== CONTENIDO ({i}/{len(trozos)}) ===\n{chunk}"
+        )
+        parcial, err = _intentar(prompt, modelo_principal, modelo_respaldo, max_tokens_por_bloque)
+        if not parcial:
+            msg = f"⚠️ No se pudo resumir este bloque. Motivo: {err or 'desconocido'}"
+            try:
+                st.warning(f"Bloque {i}/{len(trozos)}: {msg}")
+            except Exception:
+                pass
+            parcial = msg
+        res_parciales.append(parcial)
+
+    # 2) Merge final con más presupuesto de salida
+    merge_prompt = (
+        "Integra en un único resumen ejecutivo en español los siguientes resúmenes parciales "
+        "(no repitas, no contradigas, estructura con apartados: Objeto, Ámbito, Medidas, Plazos, Obligaciones, "
+        "Ayudas/Subvenciones si aplica). Máximo 250–350 palabras.\n\n" +
+        "\n\n---\n".join(res_parciales)
+    )
+    final_text, err_merge = _intentar(merge_prompt, modelo_principal, modelo_respaldo, 1024)
+
+    return final_text or "\n\n".join(res_parciales)
+
 # --- Cargar boletines al iniciar (cache) ---
 @st.cache_data(show_spinner="Cargando boletines...")
 def cargar_boletines_con_numeracion():
